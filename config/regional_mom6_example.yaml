@@ -56,7 +56,8 @@ data:
             #     path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*obc_south*.nc'
                 
             static:
-                vars_2D: ['wet', 'deptho'] 
+                vars_2D: ['wet'] # , 'deptho'] 
+                vars_3D: ['depth']
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data.nc'
     
     start_datetime: "2000-01-01" 

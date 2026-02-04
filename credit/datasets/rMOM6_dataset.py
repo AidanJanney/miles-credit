@@ -120,15 +120,15 @@ class RegionalMOM6Dataset(Dataset):
             args (tuple): Input_time step from sampler, step index from sampler
         """
         return_data = {"metadata": {}}
-        t, i = args[0]
+        t, i = args
         t = pd.Timestamp(t)
         t_target = t + self.dt
         # always load dynamic forcing
-        self._open_ds_extract_fields("dynamic_forcing", t, return_data)
-        self._open_ds_extract_fields("north_boundary", t, return_data)
-        self._open_ds_extract_fields("east_boundary", t, return_data)
-        self._open_ds_extract_fields("west_boundary", t, return_data)
-        self._open_ds_extract_fields("south_boundary", t, return_data)
+        # self._open_ds_extract_fields("dynamic_forcing", t, return_data)
+        # self._open_ds_extract_fields("north_boundary", t, return_data)
+        # self._open_ds_extract_fields("east_boundary", t, return_data)
+        # self._open_ds_extract_fields("west_boundary", t, return_data)
+        # self._open_ds_extract_fields("south_boundary", t, return_data)
 
         # load prognostic and static if first time step
         if i == 0:
@@ -174,11 +174,13 @@ class RegionalMOM6Dataset(Dataset):
                     + self.var_dict[field_type]["vars_2D"]
                 ]
                 
-                ## Transform data (should be flexible for pointwise or otherwise)
-                # if field_type != "static": # don't transorm static fields?
-                #     ds_all_vars = self._transform_data(ds_all_vars, field_type)
-                    
+                # Transform data (should be flexible for pointwise or otherwise)
+                if field_type != "static": # don't transorm static fields?
+                    ds_all_vars = self._transform_data(ds_all_vars, field_type)
 
+                if not is_target and field_type == "prognostic":
+                    ds_all_vars = self._concat_obcs(ds_all_vars, t)
+                        
                 ds_3D = ds_all_vars[self.var_dict[field_type]["vars_3D"]]
                 ds_2D = ds_all_vars[self.var_dict[field_type]["vars_2D"]]
                 # ds_all_vars = self._mask_data(ds_3D, ds_2D)
@@ -319,3 +321,19 @@ class RegionalMOM6Dataset(Dataset):
             if len(target_tensors) == 1
             else torch.cat(target_tensors, dim=dim)
         )
+    
+    def _concat_obcs(self, ds, t):
+        """Concat all available OBCs to prognostic dataset. field_type is assumed to be "prognostic".
+
+        Args:
+            ds (_type_): _description_
+        """
+        for field in ['obc_north', 'obc_south', 'obc_east', 'obc_west']:
+            if self.file_dict[field]:
+                with xr.open_dataset(self.file_dict[field][t.year]) as obc_ds:
+                    obc_ds = obc_ds.sel(time=t)
+                    if 'north' in field or 'south' in field:
+                        ds = xr.concat([ds, obc_ds], dim="latitude")
+                    elif 'east' in field or 'west' in field:
+                        ds = xr.concat([ds, obc_ds], dim="longitude")
+        return ds

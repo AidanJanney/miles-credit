@@ -1,0 +1,230 @@
+# --------------------------------------------------------------------------------------------------------------------- #
+# This yaml file implements hourly state-in-state-out crossformer
+# on NSF NCAR HPCs (casper.ucar.edu and derecho.hpc.ucar.edu) 
+# The model is trained on hourly model-level ERA5 data with top solar irradiance, geopotential, and land-sea mask
+# Output variables: model level [U, V, T, Q], single level [SP, t2m], and 500 hPa [U, V, T, Z, Q]
+# --------------------------------------------------------------------------------------------------------------------- #
+save_loc: '/glade/derecho/scratch/ajanney/Regional_Emulation/save_loc/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/'
+seed: 1000
+
+data:
+    source:
+        regional_MOM6:
+            prognostic:
+                # 50 levels
+                vars_3D: ['uo', 'vo', 'thetao', 'so']
+                vars_2D: ['SSH']
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*full_fields*.zarr'
+                transform:
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_prognostic_mean.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_prognostic_std.nc'
+
+            diagnostic: null
+
+            dynamic_forcing:
+                # dynamic forcing variables
+                vars_2D: ['tauuo', 'tauvo', 'hfds', 'friver']
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*atm*.zarr'
+                transform:
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_dynamic_mean.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_dynamic_std.nc'
+
+            north_boundary: # needs work
+                vars_3D: ['uo','vo','thetao','so']
+                vars_2D: ['SSH']
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*obc_north*.zarr'
+                transform:
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_north_mean.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_north_std.nc'
+
+            east_boundary: # needs work
+                vars_3D: ['uo','vo','thetao','so']
+                vars_2D: ['SSH']
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*obc_east*.zarr'
+                transform:
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_east_mean.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_east_std.nc'
+
+            west_boundary: null
+            #     vars_3D: ['uo','vo','thetao','so']
+            #     vars_2D: ['SSH']
+            #     path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*obc_west*.nc'
+
+            south_boundary: null
+            #     vars_3D: ['uo','vo','thetao','so']
+            #     vars_2D: ['SSH']
+            #     path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*obc_south*.nc'
+                
+            static:
+                vars_2D: ['wet', 'deptho'] 
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data.nc'
+    
+    start_datetime: "2000-01-01" 
+    end_datetime: "2019-01-01"
+    timestep: "1D"
+
+    # train:
+    #     start_datetime: "2000-01-01"
+    #     end_datetime: "2019-01-01"
+    # valid:
+    #     start_datetime: "2018-01-01" 
+    #     end_datetime: "2019-01-01"
+    # timestep: "1D"
+    
+    # state-in-state-out
+    history_len: 1 # 2 for samudra
+    valid_history_len: 1 # 2 for samudra?
+    
+    # single step
+    forecast_len: 0 # should this be 1???
+    valid_forecast_len: 0
+    
+    one_shot: False
+    lead_time_periods: 1
+    skip_periods: null
+    
+    # compatible with the old 'std'
+    static_first: True
+            
+    scaler_type: 'std_new'
+    
+trainer:
+    type: standard # <---------- change to your type
+    
+    # the keyword that controls GPU usage
+    # fsdp: fully sharded data parallel
+    # ddp: distributed data parallel
+    # none: single-GPU training
+    mode: ddp
+    cpu_offload: False
+    activation_checkpoint: True
+    
+    load_weights: True # ??
+    load_optimizer: False
+    load_scaler: False
+    load_scheduler: False
+
+    skip_validation: False
+    update_learning_rate: False
+
+    save_backup_weights: True
+    save_best_weights: True
+    
+    learning_rate: 1.0e-06 # <-- change to your lr
+    weight_decay: 0
+    
+    train_batch_size: 1 # 8 in samudra config
+    valid_batch_size: 1 # 8 in samudra config
+    
+    batches_per_epoch: 1000 # 0 in samudra, DO I NEED?
+    valid_batches_per_epoch: 0
+    stopping_patience: 999
+    
+    start_epoch: 0
+    num_epoch: 1 # probably up in the future
+    reload_epoch: True
+    epochs: &epochs 3
+     
+    use_scheduler: True
+    scheduler: {'scheduler_type': 'cosine-annealing', 'T_max': *epochs,  'last_epoch': -1}
+    
+    amp: False
+    grad_accum_every: 1
+    grad_max_norm: 1.0 # 'dynamic' in samudra config
+    
+    # number of workers
+    thread_workers: 4
+    valid_thread_workers: 4
+    
+model:
+    # crossformer example
+    type: "crossformer" # Dhamma has a crossformer_regional
+    frames: 1                         # number of input states (default: 1)
+    image_height: 458 # 457 + 1 obc              # number of latitude grids (default: 640)
+    image_width: 760 # 759 + 1 obc                # number of longitude grids (default: 1280)
+    levels: 50                        # number of upper-air variable levels (default: 15)
+    channels: 4                     ## upper-air variable channels
+    surface_channels: 1               # surface variable channels
+    input_only_channels: 6 # might             # dynamic forcing, forcing, static channels
+    output_only_channels: 0           # diagnostic variable channels
+    
+    patch_width: 1                    # number of latitude grids in each 3D patch (default: 1)
+    patch_height: 1                   # number of longitude grids in each 3D patch (default: 1)
+    frame_patch_size: 1               # number of input states in each 3D patch (default: 1)
+    
+    dim: [128, 256, 512, 1024]        # Dimensionality of each layer
+    depth: [2, 2, 8, 2]               # Depth of each layer
+    global_window_size: [10, 5, 2, 1] # Global window size for each layer
+    local_window_size: 10             # Local window size
+    cross_embed_kernel_sizes:         # kernel sizes for cross-embedding
+    - [4, 8, 16, 32]
+    - [2, 4]
+    - [2, 4]
+    - [2, 4]
+    cross_embed_strides: [2, 2, 2, 2] # Strides for cross-embedding (default: [4, 2, 2, 2])
+    attn_dropout: 0.                  # Dropout probability for attention layers (default: 0.0)
+    ff_dropout: 0.                    # Dropout probability for feed-forward layers (default: 0.0)
+    
+    # =============================================================== #
+    # New
+    
+    # use interpolation to match the output size
+    interp: False
+
+    # map boundary padding
+    padding_conf:
+        activate: True
+        mode: earth
+        pad_lat: 80
+        pad_lon: 80
+
+    post_conf:
+        activate: False
+
+loss: 
+    # the main training loss
+    training_loss: "mse"
+    
+    # power loss (x), spectral_loss (x)
+    use_power_loss: False
+    use_spectral_loss: False
+    
+    # use latitude weighting
+    use_latitude_weights: True
+    latitude_weights: "NEED TO PUT PATH HERE IF IN USE"
+    
+    # turn-off variable weighting
+    use_variable_weights: False
+    
+predict:
+    forecasts:
+        type: "custom"       # keep it as "custom"
+        num_forecast_steps: 1 # forceast step of 1 day, 1 day in a day
+        start_year: 2000     # year of the first initialization (where rollout will start)
+        start_month: 1       # month of the first initialization
+        start_day: 1         # day of the first initialization
+        start_hours: [0] # hour-of-day for each initialization, 0 for 00Z, 12 for 12Z
+        duration: 32         # number of days to initialize, starting from the (year, mon, day) above
+                             # duration should be divisible by the number of GPUs 
+                             # (e.g., duration: 384 for 365-day rollout using 32 GPUs)
+        days: 30             # forecast lead time as days (1 means 24-hour forecast)
+        
+    save_forecast: '/glade/derecho/scratch/ajanney/Regional_Emulation/Forecasts/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/'
+    save_vars: ['uo', 'vo', 'thetao', 'so', 'SSH'] # might break bc from separate 2d/3d fields
+    
+    # turn-off low-pass filter
+    use_laplace_filter: False
+    
+    # deprecated
+    # save_format: "nc"
+
+pbs: #derecho
+    conda: "/glade/work/ajanney/conda-envs/credit-derecho"
+    project: "P93300012"
+    job_name: "rmom6_carib12_wxformer_1d"
+    walltime: "12:00:00"
+    nodes: 8
+    ncpus: 64
+    ngpus: 4
+    mem: '480GB'
+    queue: 'main'

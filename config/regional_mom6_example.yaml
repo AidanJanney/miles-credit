@@ -59,8 +59,8 @@ data:
                 vars_2D: ['wet', 'deptho'] 
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data.nc'
     
-    start_datetime: "2000-01-01" 
-    end_datetime: "2019-01-01"
+    start_datetime: "2000-01-01 12:00" 
+    end_datetime: "2019-01-01 12:00"
     timestep: "1D"
 
     # train:

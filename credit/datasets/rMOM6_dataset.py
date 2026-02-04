@@ -328,7 +328,7 @@ class RegionalMOM6Dataset(Dataset):
         Args:
             ds (_type_): _description_
         """
-        for field in ['obc_north', 'obc_south', 'obc_east', 'obc_west']:
+        for field in ['north_boundary', 'south_boundary', 'east_boundary', 'west_boundary']:
             if self.file_dict[field]:
                 with xr.open_dataset(self.file_dict[field][t.year]) as obc_ds:
                     obc_ds = obc_ds.sel(time=t)

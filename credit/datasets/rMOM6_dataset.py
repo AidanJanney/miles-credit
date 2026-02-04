@@ -95,7 +95,7 @@ class RegionalMOM6Dataset(Dataset):
         
     def __len__(self):
         # total number of valid start times
-        return len(self.init_times)
+        return len(self.datetimes)
     
     def _map_files(self, file_list):
         """
@@ -120,10 +120,9 @@ class RegionalMOM6Dataset(Dataset):
             args (tuple): Input_time step from sampler, step index from sampler
         """
         return_data = {"metadata": {}}
-        t, i = args
+        t, i = args[0]
         t = pd.Timestamp(t)
         t_target = t + self.dt
-
         # always load dynamic forcing
         self._open_ds_extract_fields("dynamic_forcing", t, return_data)
         self._open_ds_extract_fields("north_boundary", t, return_data)
@@ -163,6 +162,7 @@ class RegionalMOM6Dataset(Dataset):
         if self.file_dict[field_type]:
             with xr.open_dataset(self.file_dict[field_type][t.year]) as dataset:
                 if "time" in dataset.dims:
+                    print("testing _open_ds_extract_fields")
                     if isinstance(dataset.time.values[0], cftime.datetime):
                         t = self._convert_cf_time(t)
                     ds = dataset.sel(time=t)
@@ -175,8 +175,8 @@ class RegionalMOM6Dataset(Dataset):
                 ]
                 
                 ## Transform data (should be flexible for pointwise or otherwise)
-                if field_type != "static": # don't transorm static fields?
-                    ds_all_vars = self._transform_data(ds_all_vars, field_type)
+                # if field_type != "static": # don't transorm static fields?
+                #     ds_all_vars = self._transform_data(ds_all_vars, field_type)
                     
 
                 ds_3D = ds_all_vars[self.var_dict[field_type]["vars_3D"]]

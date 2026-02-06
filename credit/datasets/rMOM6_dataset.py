@@ -120,7 +120,7 @@ class RegionalMOM6Dataset(Dataset):
             args (tuple): Input_time step from sampler, step index from sampler
         """
         return_data = {"metadata": {}}
-        t, i = args[0]
+        t, i = args#[0]
         t = pd.Timestamp(t)
         t_target = t + self.dt
         # always load dynamic forcing
@@ -175,13 +175,13 @@ class RegionalMOM6Dataset(Dataset):
                 ]
                 
                 # Transform data (should be flexible for pointwise or otherwise)
-                if field_type != "static": # don't transorm static fields?
+                if field_type != "static": # don't transorm static fields, pretransformed
                     ds_all_vars = self._transform_data(ds_all_vars, field_type)
 
                 if not is_target and field_type == "prognostic":
                     ds_all_vars = self._concat_obcs(ds_all_vars, t)
                 if not is_target and field_type in ["dynamic_forcing", "static"]:
-                    ds_all_vars = self._fill_obcs(ds_all_vars)
+                    ds_all_vars = self._fill_obcs(ds_all_vars, t)
                     
                 ds_3D = ds_all_vars[self.var_dict[field_type]["vars_3D"]]
                 ds_2D = ds_all_vars[self.var_dict[field_type]["vars_2D"]]
@@ -334,20 +334,19 @@ class RegionalMOM6Dataset(Dataset):
         for field in ['north_boundary', 'south_boundary', 'east_boundary', 'west_boundary']:
             if self.file_dict[field]:
                 with xr.open_dataset(self.file_dict[field][t.year]) as obc_ds:
-                    obc_ds['time'] = obc_ds['time'].values + pd.Timedelta('12H')
                     obc_ds = obc_ds.sel(time=t)
                     if 'north' in field or 'south' in field:
                         #for var in ds.data_vars:
                             # ds.isel(latitude=-1)[var].values = obc_ds[var].values.squeeze()
-                        ds = xr.concat([ds, obc_ds], dim="latitude")
+                        ds = xr.concat([ds, obc_ds], dim="latitude", join = "left")
                     elif 'east' in field or 'west' in field:
                         #for var in ds.data_vars:
                             # ds.isel(longitude=-1)[var].values = obc_ds[var].values.squeeze()
-                        ds = xr.concat([ds, obc_ds], dim="longitude")
+                        ds = xr.concat([ds, obc_ds], dim="longitude", join = "left")
                     
         return ds
     
-    def _fill_obcs(self, ds):
+    def _fill_obcs(self, ds, t):
         """Fill non-prognostic fields with dummy OBC data so dimensions match. 
 
         Args:
@@ -356,10 +355,16 @@ class RegionalMOM6Dataset(Dataset):
         
         for field in ['north_boundary', 'south_boundary', 'east_boundary', 'west_boundary']:
             if self.file_dict[field]:
-                if 'north' in field or 'south' in field:
-                    tmp = xr.zeros_like(ds_atm.isel(longitude=slice(0,1)))
-                    tmp['longitude'] = obc_east['longitude']
-                elif 'east' in field or 'west' in field:
-
-                    
+                with xr.open_dataset(self.file_dict[field][t.year]) as obc_ds:
+                    obc_ds = obc_ds.sel(time=t)
+                    if 'north' in field or 'south' in field:
+                        tmp = xr.zeros_like(ds.isel(latitude = slice(0,1)))
+                        tmp['latitude'] = obc_ds['latitude']
+                        ds = xr.concat([ds, tmp], dim="latitude")
+                    elif 'east' in field or 'west' in field:
+                        tmp = xr.zeros_like(ds.isel(longitude=slice(0,1)))
+                        tmp['longitude'] = obc_ds['longitude']
+                        ds = xr.concat([ds, tmp], dim="longitude")
+                        
+                        
         return ds

@@ -56,11 +56,11 @@ data:
             #     path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/CESM_Data_Preprocessing/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*obc_south*.nc'
                 
             static:
-                vars_2D: ['wet', 'deptho'] 
-                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data.nc'
+                vars_2D: ['wet', 'deptho_normal', 'areacello_normal'] 
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data_normal.nc'
     
-    start_datetime: "2000-01-01 12:00" 
-    end_datetime: "2019-01-01 12:00"
+    start_datetime: "2000-01-01" 
+    end_datetime: "2019-01-01" # "2019-01-01 12:00"
     timestep: "1D"
 
     # train:
@@ -140,8 +140,8 @@ model:
     # crossformer example
     type: "crossformer" # Dhamma has a crossformer_regional
     frames: 1                         # number of input states (default: 1)
-    image_height: 458 # 457 + 1 obc              # number of latitude grids (default: 640)
-    image_width: 760 # 759 + 1 obc                # number of longitude grids (default: 1280)
+    image_height: 457 # 457 + 1 obc              # number of latitude grids (default: 640)
+    image_width: 759 # 759 + 1 obc                # number of longitude grids (default: 1280)
     levels: 50                        # number of upper-air variable levels (default: 15)
     channels: 4                     ## upper-air variable channels
     surface_channels: 1               # surface variable channels

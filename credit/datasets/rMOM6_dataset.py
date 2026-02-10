@@ -148,7 +148,7 @@ class RegionalMOM6Dataset(Dataset):
 
         return return_data
     
-    def _open_ds_extract_fields(self, field_type, t, return_data, is_target=False):
+    def _open_ds_extract_fields(self, field_type, t, return_data, is_target=False, verbose = False):
         """
         opens the dataset, reshapes and concats the variables into n np array,
         packs it into the return dict if the data exists.
@@ -162,7 +162,7 @@ class RegionalMOM6Dataset(Dataset):
         if self.file_dict[field_type]:
             with xr.open_dataset(self.file_dict[field_type][t.year]) as dataset:
                 if "time" in dataset.dims:
-                    print("testing _open_ds_extract_fields")
+                    if verbose: print("testing _open_ds_extract_fields")
                     if isinstance(dataset.time.values[0], cftime.datetime):
                         t = self._convert_cf_time(t)
                     ds = dataset.sel(time=t)
@@ -178,7 +178,7 @@ class RegionalMOM6Dataset(Dataset):
                 if field_type != "static": # don't transorm static fields, pretransformed
                     ds_all_vars = self._transform_data(ds_all_vars, field_type)
 
-                if not is_target and field_type == "prognostic":
+                if field_type == "prognostic": # if not is_target and field_type == "prognostic":
                     ds_all_vars = self._concat_obcs(ds_all_vars, t)
                 if not is_target and field_type in ["dynamic_forcing", "static"]:
                     ds_all_vars = self._pad_obcs(ds_all_vars, t)
@@ -343,10 +343,11 @@ class RegionalMOM6Dataset(Dataset):
             if self.file_dict[field]:
                 with xr.open_dataset(self.file_dict[field][t.year]) as obc_ds:
                     obc_ds = obc_ds.sel(time=t)
+                    obc_ds = self._transform_data(obc_ds, field)
                     if 'north' in field or 'south' in field:
                         #for var in ds.data_vars:
                             # ds.isel(latitude=-1)[var].values = obc_ds[var].values.squeeze()
-                        ds = xr.concat([ds, obc_ds], dim="latitude", join = "left")
+                        ds = xr.concat([ds, obc_ds], dim="latitude", join = "left") # "left": use indexes from the first object with each dimension
                     elif 'east' in field or 'west' in field:
                         #for var in ds.data_vars:
                             # ds.isel(longitude=-1)[var].values = obc_ds[var].values.squeeze()

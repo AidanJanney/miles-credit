@@ -19,37 +19,38 @@ def train(model, dataloader, loss_fn=nn.MSELoss(), device=DEVICE, num_epochs=3):
 
     for epoch in range(num_epochs):
 
-        running_loss = 0.0,
+        running_loss = 0.0
         for _ in range(10): # len(dataloader)
 
-            # batch = next(dataloader)
+            batch = next(dataloader)
 
-            # xx = torch.cat([batch['prognostic'], batch['dynamic_forcing'], batch['static']], dim = 1).to(device)
-            # yy = batch['target'].to(device)
+            xx = torch.cat([batch['prognostic'], batch['dynamic_forcing'], batch['static']], dim = 1).to(device)
+            yy = batch['target'].to(device)
             
-            x = torch.randn(1, 67, 1, 160, 160).to(device)
-            y = torch.randn(1, 61, 1, 160, 160).to(device)
+            # x = torch.randn(1, 67, 1, 100, 100).to(device)
+            # y = torch.randn(1, 61, 1, 100, 100).to(device)
 
             optimizer.zero_grad()
 
-            y_pred = model(x)
+            y_pred = model(xx)
             # print(y_pred)
-            loss = loss_fn(y_pred, y)
+            
+            loss = loss_fn(y_pred, yy)
 
             loss.backward()
             optimizer.step()
 
-            # running_loss += loss #.item()
+            running_loss += loss.item()
             print(loss.item())
 
-        # avg_loss = running_loss / len(dataloader)
+        avg_loss = running_loss / 10
         print(f"Epoch {epoch:03d} | loss = {avg_loss:.4e}")
 
 
 if __name__ == "__main__":
 
-    image_height = 160 # 458  # 640, 192
-    image_width = 160 # 760 # 1280, 288
+    image_height = 100 # 458  # 640, 192
+    image_width = 100 # 760 # 1280, 288
     levels = 15
     frames = 1
     output_frames = 1
@@ -59,14 +60,15 @@ if __name__ == "__main__":
     frame_patch_size = 0
     upsample_v_conv = True
     # attention_type = "scse_standard"
-    padding_conf = {"activate": False,}
-                    # "mode": "earth",
-                    # "pad_lat": [30, 30],
-                    # "pad_lon": [30, 30]}
+    # padding_conf = {"activate": False,}
+    padding_conf = {"activate": True,
+                    "mode": "regional",
+                    "pad_lat": [30, 30],
+                    "pad_lon": [30, 30]}
                     # "pad_lat": [91, 91], # for use with big dims
                     # "pad_lon": [260, 260]}
 
-    x = torch.randn(1, channels * levels + surface_channels + input_only_channels, frames, image_height, image_width).to(DEVICE)
+    # x = torch.randn(1, channels * levels + surface_channels + input_only_channels, frames, image_height, image_width).to(DEVICE)
 
     model = CrossFormer(image_height=image_height,
                         image_width=image_width,
@@ -91,7 +93,7 @@ if __name__ == "__main__":
 
     model = torch.compile(model, backend="cudagraphs")
     
-    path = "/glade/work/ajanney/miles-credit/config/regional_mom6_example.yaml"
+    path = "/glade/work/ajanney/miles-credit/config/regional_mom6_tiny_upper_ocean.yaml"
 
     with open(path) as cnfg:
         config = yaml.safe_load(cnfg)

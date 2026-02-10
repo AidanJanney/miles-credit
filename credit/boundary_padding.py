@@ -31,6 +31,8 @@ class TensorPadding:
             return self._mirror_padding(x)
         elif self.mode == "earth":
             return self._earth_padding(x)
+        elif self.mode == "regional":
+            return self._regional_padding(x)
 
     def unpad(self, x):
         """
@@ -46,6 +48,8 @@ class TensorPadding:
             return self._mirror_unpad(x)
         elif self.mode == "earth":
             return self._earth_unpad(x)
+        elif self.mode == "regional":
+            return self._regional_unpad(x)
 
     def _earth_padding(self, x):
         """
@@ -137,5 +141,55 @@ class TensorPadding:
         # unpad along longitude (west-east)
         if any(p > 0 for p in self.pad_WE):
             x = x[..., :, self.pad_WE[0] : -self.pad_WE[1]]
+
+        return x
+    
+    def _regional_padding(self, x):
+        """
+        Apply regional padding to the tensor. 
+        This uses reflect style behavior at all boundaries.
+        Note: assumes a rectilinear grid, without considering poles
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: The padded tensor.
+        """
+        # pad along longitude (west-east)
+        if any(p > 0 for p in self.pad_WE):
+            x = F.pad(
+                x, pad=(self.pad_WE[0], self.pad_WE[1], 0, 0, 0, 0), mode="reflect"
+            )
+
+        # pad along latitude (north-south)
+        if any(p > 0 for p in self.pad_NS):
+            x = F.pad(
+                x, pad=(0, 0, self.pad_NS[0], self.pad_NS[1], 0, 0), mode="reflect"
+            )
+
+        return x
+    
+    def _regional_unpad(self, x):
+        """
+        Remove regional padding to restore the original tensor size.
+
+        Args:
+            x (torch.Tensor): Padded tensor.
+
+        Returns:
+            torch.Tensor: The unpadded tensor.
+        """
+        # unpad along latitude (north-south)
+        if any(p > 0 for p in self.pad_NS):
+            lat_start, lat_end = self.pad_NS
+            lat_size = x.shape[-2]
+            x = x[..., lat_start : lat_size - lat_end, :]
+
+        # unpad along longitude (west-east)
+        if any(p > 0 for p in self.pad_WE):
+            lon_start, lon_end = self.pad_WE
+            lon_size = x.shape[-1]
+            x = x[..., :, lon_start : lon_size - lon_end]
 
         return x

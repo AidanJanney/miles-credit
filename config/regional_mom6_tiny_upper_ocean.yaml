@@ -4,14 +4,13 @@
 # The model is trained on hourly model-level ERA5 data with top solar irradiance, geopotential, and land-sea mask
 # Output variables: model level [U, V, T, Q], single level [SP, t2m], and 500 hPa [U, V, T, Z, Q]
 # --------------------------------------------------------------------------------------------------------------------- #
-save_loc: '/glade/derecho/scratch/ajanney/Regional_Emulation/save_loc/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/'
+save_loc: '/glade/derecho/scratch/ajanney/Regional_Emulation/save_loc/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM_tiny/'
 seed: 1000
 
 data:
     source:
         regional_MOM6:
             prognostic:
-                # 50 levels
                 vars_3D: ['uo', 'vo', 'thetao', 'so']
                 vars_2D: ['SSH']
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_tiny_ocean/*full_field*.zarr'
@@ -34,16 +33,16 @@ data:
                 vars_2D: ['SSH']
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_tiny_ocean/*obc_north*.zarr'
                 transform:
-                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_north_mean.nc'
-                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_north_std.nc'
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_north_mean_level.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_north_std_level.nc'
 
             east_boundary: # needs work
                 vars_3D: ['uo','vo','thetao','so']
                 vars_2D: ['SSH']
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_tiny_ocean/*obc_east*.zarr'
                 transform:
-                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_east_mean.nc'
-                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_east_std.nc'
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_east_mean_level.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_east_std_level.nc'
 
             west_boundary: null
             #     vars_3D: ['uo','vo','thetao','so']

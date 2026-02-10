@@ -123,12 +123,12 @@ class RegionalMOM6Dataset(Dataset):
         t, i = args#[0]
         t = pd.Timestamp(t)
         t_target = t + self.dt
-        # always load dynamic forcing
+        # always load dynamic forcing and boundaries
         self._open_ds_extract_fields("dynamic_forcing", t, return_data)
-        # self._open_ds_extract_fields("north_boundary", t, return_data)
-        # self._open_ds_extract_fields("east_boundary", t, return_data)
-        # self._open_ds_extract_fields("west_boundary", t, return_data)
-        # self._open_ds_extract_fields("south_boundary", t, return_data)
+        self._open_ds_extract_fields("north_boundary", t, return_data)
+        self._open_ds_extract_fields("east_boundary", t, return_data)
+        self._open_ds_extract_fields("west_boundary", t, return_data)
+        self._open_ds_extract_fields("south_boundary", t, return_data)
 
         # load prognostic and static if first time step
         if i == 0:
@@ -181,20 +181,28 @@ class RegionalMOM6Dataset(Dataset):
                 if not is_target and field_type == "prognostic":
                     ds_all_vars = self._concat_obcs(ds_all_vars, t)
                 if not is_target and field_type in ["dynamic_forcing", "static"]:
-                    ds_all_vars = self._fill_obcs(ds_all_vars, t)
+                    ds_all_vars = self._pad_obcs(ds_all_vars, t)
+                
+                # if field_type == "prognostic":
+                #     ds_all_vars = self._fill_obcs(ds_all_vars, field_type)
+                    
                     
                 ds_3D = ds_all_vars[self.var_dict[field_type]["vars_3D"]]
                 ds_2D = ds_all_vars[self.var_dict[field_type]["vars_2D"]]
-                # ds_all_vars = self._mask_data(ds_3D, ds_2D)
+                
                 data_np, meta = self._reshape_and_concat(ds_3D, ds_2D)
+                
+                final_tensor = torch.tensor(data_np).float()
+                final_tensor = torch.nan_to_num(final_tensor, nan=0.0)
+                # ds_all_vars = self._mask_data(ds_3D, ds_2D)
 
                 if is_target:
                     if field_type == "prognostic":
-                        return_data["target_prognostic"] = torch.tensor(data_np).float()
+                        return_data["target_prognostic"] = final_tensor
                     elif field_type == "diagnostic":
-                        return_data["target_diagnostic"] = torch.tensor(data_np).float()
+                        return_data["target_diagnostic"] = final_tensor
                 else:
-                    return_data[field_type] = torch.tensor(data_np).float()
+                    return_data[field_type] = final_tensor
 
                 return_data["metadata"][f"{field_type}_var_order"] = meta
                 
@@ -346,7 +354,7 @@ class RegionalMOM6Dataset(Dataset):
                     
         return ds
     
-    def _fill_obcs(self, ds, t):
+    def _pad_obcs(self, ds, t):
         """Fill non-prognostic fields with dummy OBC data so dimensions match. 
 
         Args:
@@ -366,5 +374,32 @@ class RegionalMOM6Dataset(Dataset):
                         tmp['longitude'] = obc_ds['longitude']
                         ds = xr.concat([ds, tmp], dim="longitude")
                         
+                        
+        return ds
+    
+    def _fill_obcs(self, ds, field_type, t):
+        """Fill prognostic fields at the boundaries with OBC data so dimensions match.
+        Likely a temporary measure until we figure out predicition dim mismatch, but you tell me if you're reading this! 
+
+        Args:
+            ds (xr.Dataset): prognostic dataset without boundary conditions
+        """
+        
+        for field in ['north_boundary', 'south_boundary', 'east_boundary', 'west_boundary']:
+            if self.file_dict[field]:
+                
+                obc_ds = obc_ds.sel(time=t)
+                if 'north' in field:
+                    for var in ds.data_vars:
+                        ds.isel(latitude=-1)[var].values = obc_ds[var].values.squeeze()
+                elif 'south' in field:
+                    for var in ds.data_vars:
+                        ds.isel(latitude=0)[var].values = obc_ds[var].values.squeeze()
+                elif 'east' in field:
+                    for var in ds.data_vars:
+                        ds.isel(longitude=-1)[var].values = obc_ds[var].values.squeeze()
+                elif 'west' in field:
+                    for var in ds.data_vars:
+                        ds.isel(longitude=0)[var].values = obc_ds[var].values.squeeze()
                         
         return ds

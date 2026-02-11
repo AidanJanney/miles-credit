@@ -6,27 +6,47 @@ from credit.models.wxformer.crossformer import CrossFormer
 from credit.datasets.rMOM6_dataset import RegionalMOM6Dataset
 from credit.samplers import MultiStepBatchSamplerSubset, DistributedMultiStepBatchSampler
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler
+import csv
+
+import logging
+import os
+logger = logging.getLogger(__name__)
+
 
 
 DEVICE = "cuda" # "cuda" -> Nvidia GPU, "mps" --> Mac GPU
 
-def train(model, dataloader, loss_fn=nn.MSELoss(), device=DEVICE, num_epochs=3): # missing arg optimizer
+def train(model, dataloader, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE, num_epochs=3, save_dir=None): # missing arg optimizer?
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    model.train()
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    best_valid_loss = float('inf')
     
     valid_keys = ['prognostic', 'dynamic_forcing', 'static', 'target']
-
+    
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        file = open(os.path.join(save_dir, "training_log.csv"), mode='w', newline='')
+        writer = csv.writer(file, delimiter=',')
+        writer.writerow(['epoch', 'train_loss', 'validation_loss'])
+        
     for epoch in range(num_epochs):
 
+        model.train()
         running_loss = 0.0
-        for _ in range(10): # len(dataloader)
-
-            batch = next(dataloader)
-
+        
+        print(f"Starting epoch {epoch}/{num_epochs-1}")
+        
+        for batch in dataloader:
+        # for _ in range(10):
+        #     batch = next(dataloader)
+        
+            # https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_cudagraph_trees.html#limitations
+            torch.compiler.cudagraph_mark_step_begin()
+        
             xx = torch.cat([batch['prognostic'], batch['dynamic_forcing'], batch['static']], dim = 1).to(device)
             yy = batch['target'].to(device)
             
+            ## Dummy Data
             # x = torch.randn(1, 67, 1, 100, 100).to(device)
             # y = torch.randn(1, 61, 1, 100, 100).to(device)
 
@@ -42,10 +62,60 @@ def train(model, dataloader, loss_fn=nn.MSELoss(), device=DEVICE, num_epochs=3):
 
             running_loss += loss.item()
             print(loss.item())
+        
+        print(f"Starting validation for epoch {epoch}/{num_epochs-1}")
+        avg_valid_loss = validate(model, dataloader_valid, loss_fn, device)
+    
+        avg_loss = running_loss / len(dataloader)
+        
+        print(f"Epoch {epoch:03d} | loss = {avg_loss:.4e} | validation_loss = {avg_valid_loss:.4e}")
+        if save_dir is not None:
+            writer.writerow([epoch, avg_loss, avg_valid_loss])
+            file.flush()
+        
+        if save_dir is not None:
+            if (epoch+1) % 10 == 0: # Save every 10 epochs, should be an arg
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, os.path.join(save_dir, "latest_checkpoint.pt"))
+            # if avg_valid_loss < best_valid_loss: 
+            #     best_valid_loss = avg_valid_loss
+            #     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
 
-        avg_loss = running_loss / 10
-        print(f"Epoch {epoch:03d} | loss = {avg_loss:.4e}")
+    if save_dir is not None:
+        file.close()
+        print("Training complete. Saving final model checkpoint.")
+        final_checkpoint = {
+        'epoch': num_epochs,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': avg_valid_loss,
+        'config': config
+        }
+        torch.save(final_checkpoint, os.path.join(save_dir, "final_ocean_model.tar"))
+        
+def validate(model, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE):
+    
+    # Validation loop
+    model.eval() # Set model to evaluation mode
+    valid_loss = 0
 
+    with torch.no_grad(): # Disable gradient tracking
+        for batch_valid in dataloader_valid: 
+        # for _ in range(5):
+        #     batch_valid = next(dataloader_valid)
+
+            x_valid = torch.cat([batch_valid['prognostic'], batch_valid['dynamic_forcing'], batch_valid['static']], dim = 1).to(device)
+            y_valid = batch_valid['target'].to(device)
+            
+            y_pred = model(x_valid)
+            loss = loss_fn(y_pred, y_valid)
+            valid_loss += loss.item()
+    
+    avg_valid_loss = valid_loss / len(dataloader_valid)
+    return avg_valid_loss
 
 if __name__ == "__main__":
 
@@ -101,16 +171,18 @@ if __name__ == "__main__":
     data_config = config["data"]
 
     source = "regional_MOM6"
+    
     dataset = RegionalMOM6Dataset(data_config, return_target  = True)
     sampler = DistributedMultiStepBatchSampler(dataset=dataset, batch_size=5, num_replicas=1, rank = 0) 
-    
     loader = iter(DataLoader(dataset, batch_sampler=sampler))
     
-    train(model, loader)
+    valid_dataset = RegionalMOM6Dataset(data_config, return_target  = True, return_validation = True)
+    valid_sampler = DistributedMultiStepBatchSampler(dataset=valid_dataset, batch_size=5, num_replicas=1, rank = 0) 
+    valid_loader = iter(DataLoader(valid_dataset, batch_sampler=valid_sampler))
     
-    # num_params = sum(p.numel() for p in model.parameters())
-    # print(f"Number of parameters in the model: {num_params}")
-
-    # y_pred = model(x)
-    # print("Predicted shape:", y_pred.shape)
-    # print(y_pred[0])
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters in the model: {num_params}")
+    
+    num_epochs = 3
+    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/first_test/"
+    train(model, loader, valid_loader, num_epochs=num_epochs, device=DEVICE, save_dir = save_dir)

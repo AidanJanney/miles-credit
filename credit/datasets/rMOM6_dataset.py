@@ -44,13 +44,25 @@ class RegionalMOM6Dataset(Dataset):
             
     """
     
-    def __init__(self, config, return_target=False):
+    def __init__(self, config, return_target=False, return_validation = False):
+        if return_validation:
+            print(f"Validation dataset loader initialized. This will return all input and return_target data \n for start_datetime_valid and end_datetime_valid in the config.")
+        
         self.source_name = "regional_MOM6"
         self.return_target = return_target
+        
+        # if returning validation data, need to return target as well for loss calculation
+        if return_validation: self.return_target = True 
+        
         self.dt = pd.Timedelta(config["timestep"])
         self.num_forecast_steps = config["forecast_len"] + 1
         self.start_datetime = pd.Timestamp(config["start_datetime"])
         self.end_datetime = pd.Timestamp(config["end_datetime"])
+        
+        if return_validation:
+            self.start_datetime = pd.Timestamp(config["start_datetime_valid"])
+            self.end_datetime = pd.Timestamp(config["end_datetime_valid"])
+            
         self.datetimes = self._timestamps()
         self.years = [str(y) for y in self.datetimes.year]
         self.file_dict = {}
@@ -185,7 +197,6 @@ class RegionalMOM6Dataset(Dataset):
                 
                 # if field_type == "prognostic":
                 #     ds_all_vars = self._fill_obcs(ds_all_vars, field_type)
-                    
                     
                 ds_3D = ds_all_vars[self.var_dict[field_type]["vars_3D"]]
                 ds_2D = ds_all_vars[self.var_dict[field_type]["vars_2D"]]

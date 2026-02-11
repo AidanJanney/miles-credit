@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 
 DEVICE = "cuda" # "cuda" -> Nvidia GPU, "mps" --> Mac GPU
 
-def train(model, dataloader, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE, num_epochs=3, save_dir=None): # missing arg optimizer?
+def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), optimizer = None, device=DEVICE, num_epochs=3, start_epoch = 0, save_dir=None): # missing arg optimizer?
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    if optimizer is None:
+        optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+        
     best_valid_loss = float('inf')
     
     valid_keys = ['prognostic', 'dynamic_forcing', 'static', 'target']
@@ -29,8 +31,12 @@ def train(model, dataloader, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVI
         writer = csv.writer(file, delimiter=',')
         writer.writerow(['epoch', 'train_loss', 'validation_loss'])
         
-    for epoch in range(num_epochs):
-
+    for epoch in range(start_epoch, num_epochs):
+        
+        # Necessary for restarting runs
+        sampler.set_epoch(epoch) 
+        valid_sampler.set_epoch(epoch)
+        
         model.train()
         running_loss = 0.0
         
@@ -87,9 +93,12 @@ def train(model, dataloader, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVI
     if save_dir is not None:
         file.close()
         print("Training complete. Saving final model checkpoint.")
+        
+        unwrapped_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        
         final_checkpoint = {
         'epoch': num_epochs,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': unwrapped_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': avg_valid_loss,
         'config': config
@@ -113,6 +122,7 @@ def validate(model, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE):
             y_pred = model(x_valid)
             loss = loss_fn(y_pred, y_valid)
             valid_loss += loss.item()
+            print(f"Validation Loss: {loss.item()}")
     
     avg_valid_loss = valid_loss / len(dataloader_valid)
     return avg_valid_loss
@@ -160,8 +170,19 @@ if __name__ == "__main__":
                         ff_dropout=0.0,
                         upsample_with_ps = True,
                         padding_conf=padding_conf).to(DEVICE)
+    
+    ## Restart from saved checkpoint
+    # checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/first_test_short/final_ocean_model.tar"
+    # checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+    # state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
+    # model.load_state_dict(state_dict)
+    # optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    start_epoch = 0
 
     model = torch.compile(model, backend="cudagraphs")
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
     
     path = "/glade/work/ajanney/miles-credit/config/regional_mom6_tiny_upper_ocean.yaml"
 
@@ -174,15 +195,15 @@ if __name__ == "__main__":
     
     dataset = RegionalMOM6Dataset(data_config, return_target  = True)
     sampler = DistributedMultiStepBatchSampler(dataset=dataset, batch_size=5, num_replicas=1, rank = 0) 
-    loader = iter(DataLoader(dataset, batch_sampler=sampler))
+    loader = DataLoader(dataset, batch_sampler=sampler)
     
     valid_dataset = RegionalMOM6Dataset(data_config, return_target  = True, return_validation = True)
     valid_sampler = DistributedMultiStepBatchSampler(dataset=valid_dataset, batch_size=5, num_replicas=1, rank = 0) 
-    valid_loader = iter(DataLoader(valid_dataset, batch_sampler=valid_sampler))
+    valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler)
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters in the model: {num_params}")
     
-    num_epochs = 3
-    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/first_test/"
-    train(model, loader, valid_loader, num_epochs=num_epochs, device=DEVICE, save_dir = save_dir)
+    num_epochs = 30
+    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/second_test_30e/"
+    train(model, loader, valid_loader, config = data_config, optimizer=optimizer, num_epochs=num_epochs, start_epoch = start_epoch, device=DEVICE, save_dir = save_dir)

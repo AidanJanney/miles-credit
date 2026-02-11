@@ -59,9 +59,9 @@ data:
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_tiny_ocean/carib12_emulation_static_data_normal.nc'
     
     start_datetime: "2000-01-01" 
-    end_datetime: "2010-01-01" # "2019-01-01 12:00"
-    start_datetime_valid: "2011-01-01"
-    end_datetime_valid: "2015-01-01"
+    end_datetime: "2009-12-31" # "2019-01-01 12:00"
+    start_datetime_valid: "2010-01-01"
+    end_datetime_valid: "2011-12-31"
     timestep: "1D"
 
     # train:

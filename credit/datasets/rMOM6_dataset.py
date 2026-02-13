@@ -137,10 +137,10 @@ class RegionalMOM6Dataset(Dataset):
         t_target = t + self.dt
         # always load dynamic forcing and boundaries
         self._open_ds_extract_fields("dynamic_forcing", t, return_data)
-        self._open_ds_extract_fields("north_boundary", t, return_data)
-        self._open_ds_extract_fields("east_boundary", t, return_data)
-        self._open_ds_extract_fields("west_boundary", t, return_data)
-        self._open_ds_extract_fields("south_boundary", t, return_data)
+        # self._open_ds_extract_fields("north_boundary", t, return_data)
+        # self._open_ds_extract_fields("east_boundary", t, return_data)
+        # self._open_ds_extract_fields("west_boundary", t, return_data)
+        # self._open_ds_extract_fields("south_boundary", t, return_data)
 
         # load prognostic and static if first time step
         if i == 0:

@@ -34,16 +34,16 @@ data:
                 vars_2D: ['SSH']
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/*obc_north*.zarr'
                 transform:
-                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_north_mean.nc'
-                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_north_std.nc'
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics//carib12_emulation_obc_north_mean_level.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_north_std_level.nc'
 
             east_boundary: # needs work
                 vars_3D: ['uo','vo','thetao','so']
                 vars_2D: ['SSH']
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/*obc_east*.zarr'
                 transform:
-                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_east_mean.nc'
-                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_obc_east_std.nc'
+                    mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_east_mean_level.nc'
+                    std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_east_std_level.nc'
 
             west_boundary: null
             #     vars_3D: ['uo','vo','thetao','so']
@@ -60,7 +60,9 @@ data:
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data_normal.nc'
     
     start_datetime: "2000-01-01" 
-    end_datetime: "2019-01-01" # "2019-01-01 12:00"
+    end_datetime: "2005-12-31" # "2019-01-01 12:00"
+    start_datetime_valid: "2010-01-01"
+    end_datetime_valid: "2011-12-31"
     timestep: "1D"
 
     # train:

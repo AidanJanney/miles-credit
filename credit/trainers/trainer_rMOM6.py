@@ -8,6 +8,11 @@ from credit.samplers import MultiStepBatchSamplerSubset, DistributedMultiStepBat
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler
 import csv
 
+# Source - https://stackoverflow.com/a/7370824
+# Posted by NPE, modified by community. See post 'Timeline' for change history
+# Retrieved 2026-02-12, License - CC BY-SA 4.0
+import time
+
 import logging
 import os
 logger = logging.getLogger(__name__)
@@ -16,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEVICE = "cuda" # "cuda" -> Nvidia GPU, "mps" --> Mac GPU
 
-def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), optimizer = None, device=DEVICE, num_epochs=3, start_epoch = 0, save_dir=None): # missing arg optimizer?
+def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), optimizer = None, device=DEVICE, num_epochs=3, start_epoch = 0, save_dir=None, batch_size=1): # missing arg optimizer?
 
     if optimizer is None:
         optimizer = optim.AdamW(model.parameters(), lr=1e-3)
@@ -27,12 +32,13 @@ def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), opt
     
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
-        file = open(os.path.join(save_dir, "training_log.csv"), mode='w', newline='')
+        file = open(os.path.join(save_dir, "training_log.csv"), mode='a', newline='')
         writer = csv.writer(file, delimiter=',')
         writer.writerow(['epoch', 'train_loss', 'validation_loss'])
         
     for epoch in range(start_epoch, num_epochs):
-        
+        start = time.time()
+
         # Necessary for restarting runs
         sampler.set_epoch(epoch) 
         valid_sampler.set_epoch(epoch)
@@ -45,6 +51,8 @@ def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), opt
         for batch in dataloader:
         # for _ in range(10):
         #     batch = next(dataloader)
+            if batch['prognostic'].shape[0] != batch_size: # Skip last batch if smaller than batch size (can happen with drop_last=False)
+                    continue
         
             # https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_cudagraph_trees.html#limitations
             torch.compiler.cudagraph_mark_step_begin()
@@ -70,7 +78,7 @@ def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), opt
             print(loss.item())
         
         print(f"Starting validation for epoch {epoch}/{num_epochs-1}")
-        avg_valid_loss = validate(model, dataloader_valid, loss_fn, device)
+        avg_valid_loss = validate(model, dataloader_valid, loss_fn, device, batch_size)
     
         avg_loss = running_loss / len(dataloader)
         
@@ -89,6 +97,9 @@ def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), opt
             # if avg_valid_loss < best_valid_loss: 
             #     best_valid_loss = avg_valid_loss
             #     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
+            
+        end = time.time()
+        print(f"Epoch {epoch} time: {end - start:.2f} seconds")
 
     if save_dir is not None:
         file.close()
@@ -105,17 +116,22 @@ def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), opt
         }
         torch.save(final_checkpoint, os.path.join(save_dir, "final_ocean_model.tar"))
         
-def validate(model, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE):
+def validate(model, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE, batch_size=1):
     
     # Validation loop
     model.eval() # Set model to evaluation mode
     valid_loss = 0
-
+    i = 0
+    start_val = time.time()
     with torch.no_grad(): # Disable gradient tracking
         for batch_valid in dataloader_valid: 
+            if batch_valid['prognostic'].shape[0] != batch_size: # Skip last batch if smaller than batch size (can happen with drop_last=False)
+                continue
         # for _ in range(5):
         #     batch_valid = next(dataloader_valid)
-
+            data_ready_time = time.time()
+            torch.compiler.cudagraph_mark_step_begin()
+            
             x_valid = torch.cat([batch_valid['prognostic'], batch_valid['dynamic_forcing'], batch_valid['static']], dim = 1).to(device)
             y_valid = batch_valid['target'].to(device)
             
@@ -123,15 +139,21 @@ def validate(model, dataloader_valid, loss_fn=nn.MSELoss(), device=DEVICE):
             loss = loss_fn(y_pred, y_valid)
             valid_loss += loss.item()
             print(f"Validation Loss: {loss.item()}")
+            
+            model_time = time.time()
+            i += 1
+            if i % 10 == 0:
+                print(f"Batch {i} - Data wait time: {data_ready_time - start_val:.4f}s, Model time: {model_time - data_ready_time:.4f}s")
+            start_val = time.time()
     
     avg_valid_loss = valid_loss / len(dataloader_valid)
     return avg_valid_loss
 
 if __name__ == "__main__":
 
-    image_height = 100 # 458  # 640, 192
-    image_width = 100 # 760 # 1280, 288
-    levels = 15
+    image_height = 458 # 458  # 640, 192
+    image_width = 760 # 760 # 1280, 288
+    levels = 50
     frames = 1
     output_frames = 1
     channels = 4
@@ -143,10 +165,10 @@ if __name__ == "__main__":
     # padding_conf = {"activate": False,}
     padding_conf = {"activate": True,
                     "mode": "regional",
-                    "pad_lat": [30, 30],
-                    "pad_lon": [30, 30]}
-                    # "pad_lat": [91, 91], # for use with big dims
-                    # "pad_lon": [260, 260]}
+                    # "pad_lat": [30, 30],
+                    # "pad_lon": [30, 30]}
+                    "pad_lat": [11, 11], # for use with big dims
+                    "pad_lon": [20, 20]}
 
     # x = torch.randn(1, channels * levels + surface_channels + input_only_channels, frames, image_height, image_width).to(DEVICE)
 
@@ -172,7 +194,7 @@ if __name__ == "__main__":
                         padding_conf=padding_conf).to(DEVICE)
     
     ## Restart from saved checkpoint
-    # checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/first_test_short/final_ocean_model.tar"
+    # checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain/final_ocean_model.tar"
     # checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
     # state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
     # model.load_state_dict(state_dict)
@@ -184,7 +206,8 @@ if __name__ == "__main__":
     model = torch.compile(model, backend="cudagraphs")
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
     
-    path = "/glade/work/ajanney/miles-credit/config/regional_mom6_tiny_upper_ocean.yaml"
+    # path = "/glade/work/ajanney/miles-credit/config/regional_mom6_tiny_upper_ocean.yaml"
+    path = "/glade/work/ajanney/miles-credit/config/regional_mom6_example.yaml"
 
     with open(path) as cnfg:
         config = yaml.safe_load(cnfg)
@@ -192,18 +215,22 @@ if __name__ == "__main__":
     data_config = config["data"]
 
     source = "regional_MOM6"
+    batch_size = 1
+    num_workers = 8
     
     dataset = RegionalMOM6Dataset(data_config, return_target  = True)
-    sampler = DistributedMultiStepBatchSampler(dataset=dataset, batch_size=5, num_replicas=1, rank = 0) 
-    loader = DataLoader(dataset, batch_sampler=sampler)
+    sampler = DistributedMultiStepBatchSampler(dataset=dataset, batch_size=batch_size, num_replicas=1, rank = 0) 
+    # drop_last=True doesn't work as expected, it's related to num_replicas and rank, so we handle dropping last batch in the training loop instead
+    loader = DataLoader(dataset, batch_sampler=sampler, num_workers=num_workers, prefetch_factor=2, persistent_workers=True, pin_memory=True)
     
     valid_dataset = RegionalMOM6Dataset(data_config, return_target  = True, return_validation = True)
-    valid_sampler = DistributedMultiStepBatchSampler(dataset=valid_dataset, batch_size=5, num_replicas=1, rank = 0) 
-    valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler)
+    valid_sampler = DistributedMultiStepBatchSampler(dataset=valid_dataset, batch_size=batch_size, num_replicas=1, rank = 0) 
+    # drop_last=True doesn't work as expected, it's related to num_replicas and rank, so we handle dropping last batch in the validation loop instead
+    valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, num_workers=num_workers, prefetch_factor=2, persistent_workers=True, pin_memory=True)
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters in the model: {num_params}")
     
-    num_epochs = 30
-    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/second_test_30e/"
-    train(model, loader, valid_loader, config = data_config, optimizer=optimizer, num_epochs=num_epochs, start_epoch = start_epoch, device=DEVICE, save_dir = save_dir)
+    num_epochs = 20
+    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_3batch/"
+    train(model, loader, valid_loader, config = data_config, optimizer=optimizer, num_epochs=num_epochs, start_epoch = start_epoch, device=DEVICE, save_dir = save_dir, batch_size = sampler.batch_size)

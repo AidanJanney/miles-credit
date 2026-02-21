@@ -7,11 +7,11 @@
 #PBS -j oe
 #PBS -m bae 
 
-module load peak-memusage
+# module load peak-memusage
 module load conda
 conda activate credit-casper
 
 cd /glade/work/ajanney/miles-credit/credit/trainers
 
 export PYTHONUNBUFFERED=1
-peak_memusage python trainer_rMOM6.py
+python trainer_rMOM6.py

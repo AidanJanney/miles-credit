@@ -4,6 +4,10 @@
 # The model is trained on hourly model-level ERA5 data with top solar irradiance, geopotential, and land-sea mask
 # Output variables: model level [U, V, T, Q], single level [SP, t2m], and 500 hPa [U, V, T, Z, Q]
 # --------------------------------------------------------------------------------------------------------------------- #
+
+#### IMPORTANT ####
+# Probably need to addan arg for order of elements, specifically lat/lon order
+
 save_loc: '/glade/derecho/scratch/ajanney/Regional_Emulation/save_loc/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/'
 seed: 1000
 
@@ -78,8 +82,8 @@ data:
     valid_history_len: 1 # 2 for samudra?
     
     # single step
-    forecast_len: 0 # should this be 1???
-    valid_forecast_len: 0
+    forecast_len: 1  # should this be 1???
+    valid_forecast_len: 1
     
     one_shot: False
     lead_time_periods: 1
@@ -137,7 +141,7 @@ trainer:
     # number of workers
     thread_workers: 4
     valid_thread_workers: 4
-    
+
 model:
     # crossformer example
     type: "crossformer" # Dhamma has a crossformer_regional

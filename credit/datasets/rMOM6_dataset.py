@@ -44,12 +44,17 @@ class RegionalMOM6Dataset(Dataset):
             
     """
     
-    def __init__(self, config, return_target=False, return_validation = False):
+    def __init__(self, config, return_target=False, return_validation = False, predict = False):
         if return_validation:
             print(f"Validation dataset loader initialized. This will return all input and return_target data \n for start_datetime_valid and end_datetime_valid in the config.")
+        if return_validation and predict:
+            raise ValueError("Temp error. Cannot set both return_validation and predict to True. Validation dataset should return targets for loss calculation, while predict dataset should not return targets.")
+        if return_target and predict:
+            raise ValueError("Temp error. Cannot set both return_target and predict to True. Predict dataset should not return targets, while training dataset should return targets.")
         
         self.source_name = "regional_MOM6"
         self.return_target = return_target
+        self.predict = predict
         
         # if returning validation data, need to return target as well for loss calculation
         if return_validation: self.return_target = True 
@@ -62,6 +67,9 @@ class RegionalMOM6Dataset(Dataset):
         if return_validation:
             self.start_datetime = pd.Timestamp(config["start_datetime_valid"])
             self.end_datetime = pd.Timestamp(config["end_datetime_valid"])
+        elif predict:
+            self.start_datetime = pd.Timestamp(config["start_datetime_predict"])
+            self.end_datetime = pd.Timestamp(config["end_datetime_predict"])
             
         self.datetimes = self._timestamps()
         self.years = [str(y) for y in self.datetimes.year]
@@ -137,15 +145,17 @@ class RegionalMOM6Dataset(Dataset):
         t_target = t + self.dt
         # always load dynamic forcing and boundaries
         self._open_ds_extract_fields("dynamic_forcing", t, return_data)
-        # self._open_ds_extract_fields("north_boundary", t, return_data)
-        # self._open_ds_extract_fields("east_boundary", t, return_data)
-        # self._open_ds_extract_fields("west_boundary", t, return_data)
-        # self._open_ds_extract_fields("south_boundary", t, return_data)
+        
+        self._open_ds_extract_fields("north_boundary", t, return_data)
+        self._open_ds_extract_fields("east_boundary", t, return_data)
+        self._open_ds_extract_fields("west_boundary", t, return_data)
+        self._open_ds_extract_fields("south_boundary", t, return_data)
 
         # load prognostic and static if first time step
         if i == 0:
             self._open_ds_extract_fields("static", t, return_data)
             self._open_ds_extract_fields("prognostic", t, return_data)
+            # self._make_full_domain_mask(return_data)
 
         # load t+1 if training
         if self.return_target:
@@ -202,26 +212,6 @@ class RegionalMOM6Dataset(Dataset):
                 ds_2D = ds_all_vars[self.var_dict[field_type]["vars_2D"]]
                 
                 data_np, meta = self._reshape_and_concat(ds_3D, ds_2D)
-                
-                final_tensor = torch.tensor(data_np).float()
-                final_tensor = torch.nan_to_num(final_tensor, nan=0.0)
-                # ds_all_vars = self._mask_data(ds_3D, ds_2D)
-
-                if is_target:
-                    if field_type == "prognostic":
-                        return_data["target_prognostic"] = final_tensor
-                    elif field_type == "diagnostic":
-                        return_data["target_diagnostic"] = final_tensor
-                else:
-                    return_data[field_type] = final_tensor
-
-                return_data["metadata"][f"{field_type}_var_order"] = meta
-                
-    def _reshape_and_concat(self, ds_3D, ds_2D):
-        """
-        Stack 3D variables along level and variable, concatenate with 2D variables, and reorder dimensions. 
-
-        Args:
             ds_3D (xr.Dataset): Xarray dataset with 3D spatial variables
             ds_2D (xr.Dataset): Xarray dataset with 2D spatial variables
         """

@@ -8,6 +8,8 @@ from credit.samplers import MultiStepBatchSamplerSubset, DistributedMultiStepBat
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler
 import csv
 
+### ACCELERATE TOOLBOX
+
 # Source - https://stackoverflow.com/a/7370824
 # Posted by NPE, modified by community. See post 'Timeline' for change history
 # Retrieved 2026-02-12, License - CC BY-SA 4.0
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 DEVICE = "cuda" # "cuda" -> Nvidia GPU, "mps" --> Mac GPU
 
-def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), optimizer = None, device=DEVICE, num_epochs=3, start_epoch = 0, save_dir=None, batch_size=1): # missing arg optimizer?
+def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), optimizer = None, device=DEVICE, num_epochs=3, start_epoch = 1, save_dir=None, batch_size=1): # missing arg optimizer?
 
     if optimizer is None:
         optimizer = optim.AdamW(model.parameters(), lr=1e-3)
@@ -34,9 +36,10 @@ def train(model, dataloader, dataloader_valid, config, loss_fn=nn.MSELoss(), opt
         os.makedirs(save_dir, exist_ok=True)
         file = open(os.path.join(save_dir, "training_log.csv"), mode='a', newline='')
         writer = csv.writer(file, delimiter=',')
-        writer.writerow(['epoch', 'train_loss', 'validation_loss'])
+        if start_epoch == 0:
+            writer.writerow(['epoch', 'train_loss', 'validation_loss'])
         
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, num_epochs+1):
         start = time.time()
 
         # Necessary for restarting runs
@@ -184,7 +187,7 @@ if __name__ == "__main__":
                         upsample_v_conv=upsample_v_conv,
                         dim=(128, 256, 512, 1024),
                         depth=(2, 2, 8, 2),
-                        global_window_size=(20, 10, 5, 2),
+                        global_window_size=(20, 10, 5, 2), ## Make powers of 2
                         local_window_size=5,
                         cross_embed_kernel_sizes=((4, 8, 16, 32), (2, 4), (2, 4), (2, 4)),
                         cross_embed_strides=(2, 2, 2, 2),
@@ -193,15 +196,18 @@ if __name__ == "__main__":
                         upsample_with_ps = True,
                         padding_conf=padding_conf).to(DEVICE)
     
+    ## IMPORTANT
+    ## Tracer fixed Post block
+    
     ## Restart from saved checkpoint
-    # checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain/final_ocean_model.tar"
-    # checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-    # state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
-    # model.load_state_dict(state_dict)
-    # optimizer = optim.AdamW(model.parameters(), lr=1e-3)
-    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_cont/final_ocean_model.tar" # "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_cont/final_ocean_model.tar"
+    checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
+    model.load_state_dict(state_dict)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    start_epoch = 0
+    start_epoch = 30
 
     model = torch.compile(model, backend="cudagraphs")
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
@@ -230,7 +236,8 @@ if __name__ == "__main__":
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters in the model: {num_params}")
+    print(f"len(loader) = {len(loader)}")
     
-    num_epochs = 20
-    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_3batch/"
+    num_epochs = 40
+    save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_cont"
     train(model, loader, valid_loader, config = data_config, optimizer=optimizer, num_epochs=num_epochs, start_epoch = start_epoch, device=DEVICE, save_dir = save_dir, batch_size = sampler.batch_size)

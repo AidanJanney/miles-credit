@@ -212,6 +212,26 @@ class RegionalMOM6Dataset(Dataset):
                 ds_2D = ds_all_vars[self.var_dict[field_type]["vars_2D"]]
                 
                 data_np, meta = self._reshape_and_concat(ds_3D, ds_2D)
+                
+                final_tensor = torch.tensor(data_np).float()
+                final_tensor = torch.nan_to_num(final_tensor, nan=0.0)
+                # ds_all_vars = self._mask_data(ds_3D, ds_2D)
+
+                if is_target:
+                    if field_type == "prognostic":
+                        return_data["target_prognostic"] = final_tensor
+                    elif field_type == "diagnostic":
+                        return_data["target_diagnostic"] = final_tensor
+                else:
+                    return_data[field_type] = final_tensor
+
+                return_data["metadata"][f"{field_type}_var_order"] = meta
+                
+    def _reshape_and_concat(self, ds_3D, ds_2D):
+        """
+        Stack 3D variables along level and variable, concatenate with 2D variables, and reorder dimensions. 
+
+        Args:
             ds_3D (xr.Dataset): Xarray dataset with 3D spatial variables
             ds_2D (xr.Dataset): Xarray dataset with 2D spatial variables
         """

@@ -22,17 +22,30 @@ def rollout(model, dataloader, device, num_forecast_steps=10, save_dir='.'):
     
     initial_batch = next(loader)
     static_fields = initial_batch['static'].to(device)
-    x = torch.cat([initial_batch['prognostic'], initial_batch['dynamic_forcing'], initial_batch['static']], dim=1).to(device)
+    prog_nan_mask = initial_batch['prognostic_nan_mask'].to(device)
+    
+    north_boundary = initial_batch['north_boundary'].to(device)
+    east_boundary = initial_batch['east_boundary'].to(device)
+    dynamic_forcing = initial_batch['dynamic_forcing'].to(device)
+    raw_prognostic = initial_batch['prognostic'].to(device)
+    
+    raw_prognostic = torch.cat([raw_prognostic, north_boundary], dim = 3)
+            
+    ne_corner = torch.zeros_like(east_boundary[:,:,:,-1:,:])
+    east_with_corner = torch.cat([east_boundary, ne_corner], dim=3)
+    raw_prognostic = torch.cat([raw_prognostic, east_with_corner], dim = 4)
+    
+    x = torch.cat([raw_prognostic, dynamic_forcing, static_fields], dim=1).to(device)
     
     torch.save(initial_batch['metadata'], f"{save_dir}/metadata.pt")
-    torch.save(initial_batch['prognostic'].cpu(), f"{save_dir}/initial_prognostic.pt")
+    torch.save(initial_batch['prognostic'].cpu(), f"{save_dir}/prediction_step_0.pt")
     
     print("Initial batch keys:", initial_batch.keys())
     
     predictions = []
     
     with torch.no_grad():
-        for step in range(num_forecast_steps-1):
+        for step in range(num_forecast_steps):
             start = time.time() 
             torch.compiler.cudagraph_mark_step_begin()
             
@@ -40,11 +53,11 @@ def rollout(model, dataloader, device, num_forecast_steps=10, save_dir='.'):
             end = time.time()
             print(f"Prediction time: {end - start:.2f} seconds")
             
-            y_pred = y_pred*static_fields[:,0:1,...]
             y_pred = y_pred[:,:,:,0:-1,0:-1] # remove boundary conditions, inaccurate, could be better
+            y_pred[prog_nan_mask] = 0.0 # reapply nan mask after prediction
             
             # predictions.append(y_pred.cpu()) #ypred.cpu()???
-            torch.save(y_pred.cpu(), f"{save_dir}/prediction_step_{step}.pt")
+            torch.save(y_pred.cpu(), f"{save_dir}/prediction_step_{step+1}.pt")
             predictions.append(1)
             
             batch = next(loader)
@@ -60,8 +73,8 @@ def rollout(model, dataloader, device, num_forecast_steps=10, save_dir='.'):
             ## I need to do the boundary concatenation here. Right now my dataloader can return the boundaries, so something like:
             y_pred = torch.cat([y_pred, north_boundary], dim = 3)
             
-            ne_corner = torch.zeros_like(east_boundary[:,:,:,0:1,:])
-            east_with_corner = torch.cat([ne_corner, east_boundary], dim=3)
+            ne_corner = torch.zeros_like(east_boundary[:,:,:,-1:,:])
+            east_with_corner = torch.cat([east_boundary, ne_corner], dim=3)
             y_pred = torch.cat([y_pred, east_with_corner], dim = 4)
             
             end = time.time()
@@ -81,7 +94,7 @@ if __name__ == "__main__":
 
     image_height = 458 # 458  # 640, 192
     image_width = 760 # 760 # 1280, 288
-    levels = 50
+    levels = 15
     frames = 1
     output_frames = 1
     channels = 4
@@ -121,7 +134,8 @@ if __name__ == "__main__":
     
     # Restart from saved checkpoint
     print("Loading model from checkpoint...")
-    checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_cont/final_ocean_model_copy.tar"
+    checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_upper_ocean/final_ocean_model.tar"
+    # checkpoint_path = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain_cont/final_ocean_model_copy.tar"
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model_state_dict'].items()}
     model.load_state_dict(state_dict)
@@ -134,13 +148,15 @@ if __name__ == "__main__":
     # optimizer = optim.AdamW(model.parameters(), lr=1e-3)
     
     # path = "/glade/work/ajanney/miles-credit/config/regional_mom6_tiny_upper_ocean.yaml"
-    path = "/glade/work/ajanney/miles-credit/config/regional_mom6_example.yaml"
+    # path = "/glade/work/ajanney/miles-credit/config/regional_mom6_example.yaml"
+    path = "/glade/work/ajanney/miles-credit/config/regional_mom6_upper_ocean.yaml"
+
 
     with open(path) as cnfg:
         config = yaml.safe_load(cnfg)
 
     data_config = config["data"]
-    data_config["forecast_len"] = 365 # config["predict"]["forecast_len"] # Ensure data_config has forecast_len for dataset initialization, can be used for both train and valid datasets since they should have the same forecast_len
+    data_config["forecast_len"] = 365+366+365+365+363 # config["predict"]["forecast_len"] # Ensure data_config has forecast_len for dataset initialization, can be used for both train and valid datasets since they should have the same forecast_len
 
     source = "regional_MOM6"
     batch_size = 1
@@ -149,13 +165,13 @@ if __name__ == "__main__":
     print("Initializing dataset and dataloader...")
     dataset = RegionalMOM6Dataset(data_config, predict = True)
     sampler = DistributedMultiStepBatchSampler(dataset=dataset, batch_size=batch_size, num_replicas=1, rank = 0, shuffle = False) 
-    loader = DataLoader(dataset, batch_sampler=sampler, num_workers=num_workers, persistent_workers=True, pin_memory=True)
+    loader = DataLoader(dataset, batch_sampler=sampler, num_workers=num_workers, persistent_workers=True, pin_memory=True, shuffle = False)
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters in the model: {num_params}")
     
     # save_dir = "/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/test_full_domain/rollout"
-    save_dir = "/glade/work/ajanney/Regional_Ocean_Emulation/test_full_domain/rollout_long"
+    save_dir = "/glade/work/ajanney/Regional_Ocean_Emulation/upper_ocean/upper_ocean_rollout_multi_year"
     
     print(f"len(loader) = {len(loader)}")
     print(f"dataset.num_forecast_steps = {dataset.num_forecast_steps}")

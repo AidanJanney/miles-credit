@@ -18,7 +18,7 @@ data:
                 # 50 levels
                 vars_3D: ['uo', 'vo', 'thetao', 'so']
                 vars_2D: ['SSH']
-                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/*full_field*.zarr'
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_ocean_15/*full_field*.zarr'
                 transform:
                     mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_full_field_mean.nc'
                     std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/statistics/carib12_emulation_full_field_std.nc'
@@ -36,7 +36,7 @@ data:
             north_boundary: # needs work
                 vars_3D: ['uo','vo','thetao','so']
                 vars_2D: ['SSH']
-                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/*obc_north*.zarr'
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_ocean_15/*obc_north*.zarr'
                 transform:
                     mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics//carib12_emulation_obc_north_mean_level.nc'
                     std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_north_std_level.nc'
@@ -44,7 +44,7 @@ data:
             east_boundary: # needs work
                 vars_3D: ['uo','vo','thetao','so']
                 vars_2D: ['SSH']
-                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/*obc_east*.zarr'
+                path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/upper_ocean_15/*obc_east*.zarr'
                 transform:
                     mean_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_east_mean_level.nc'
                     std_path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/datetime_obcs/statistics/carib12_emulation_obc_east_std_level.nc'
@@ -64,9 +64,11 @@ data:
                 path: '/glade/derecho/scratch/ajanney/Regional_Ocean_Emulation/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/carib12_emulation_static_data_normal.nc'
     
     start_datetime: "2000-01-01" 
-    end_datetime: "2001-12-31" # "2019-01-01 12:00"
-    start_datetime_valid: "2010-01-01"
-    end_datetime_valid: "2010-12-31"
+    end_datetime: "2014-01-31" # "2019-01-01 12:00"
+    start_datetime_valid: "2015-01-01"
+    end_datetime_valid: "2019-01-31"
+    start_datetime_predict: "2015-01-01"
+    end_datetime_predict: "2019-12-31"
     timestep: "1D"
 
     # train:
@@ -82,8 +84,8 @@ data:
     valid_history_len: 1 # 2 for samudra?
     
     # single step
-    forecast_len: 1  # should this be 1???
-    valid_forecast_len: 1
+    forecast_len: 0 #1  # should this be 1???
+    valid_forecast_len: 0
     
     one_shot: False
     lead_time_periods: 1

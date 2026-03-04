@@ -73,6 +73,7 @@ class RegionalMOM6Dataset(Dataset):
             
         self.datetimes = self._timestamps()
         self.years = [str(y) for y in self.datetimes.year]
+        if predict: self.years = [str(y) for y in pd.date_range(self.start_datetime, self.end_datetime, freq=self.dt).year] 
         self.file_dict = {}
         self.var_dict = {}
         self.stats_dict = {}
@@ -200,8 +201,8 @@ class RegionalMOM6Dataset(Dataset):
                 if field_type != "static": # don't transorm static fields, pretransformed
                     ds_all_vars = self._transform_data(ds_all_vars, field_type)
 
-                if field_type == "prognostic": # if not is_target and field_type == "prognostic":
-                    ds_all_vars = self._concat_obcs(ds_all_vars, t)
+                # if field_type == "prognostic": # if not is_target and field_type == "prognostic":
+                #     ds_all_vars = self._concat_obcs(ds_all_vars, t)
                 if not is_target and field_type in ["dynamic_forcing", "static"]:
                     ds_all_vars = self._pad_obcs(ds_all_vars, t)
                 
@@ -214,6 +215,7 @@ class RegionalMOM6Dataset(Dataset):
                 data_np, meta = self._reshape_and_concat(ds_3D, ds_2D)
                 
                 final_tensor = torch.tensor(data_np).float()
+                if not is_target and field_type == "prognostic": return_data['prognostic_nan_mask'] = torch.isnan(final_tensor)
                 final_tensor = torch.nan_to_num(final_tensor, nan=0.0)
                 # ds_all_vars = self._mask_data(ds_3D, ds_2D)
 
@@ -224,6 +226,7 @@ class RegionalMOM6Dataset(Dataset):
                         return_data["target_diagnostic"] = final_tensor
                 else:
                     return_data[field_type] = final_tensor
+                    
 
                 return_data["metadata"][f"{field_type}_var_order"] = meta
                 

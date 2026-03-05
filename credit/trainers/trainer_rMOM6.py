@@ -9,17 +9,11 @@ from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler
 import csv
 
 ### ACCELERATE TOOLBOX
-
-# Source - https://stackoverflow.com/a/7370824
-# Posted by NPE, modified by community. See post 'Timeline' for change history
-# Retrieved 2026-02-12, License - CC BY-SA 4.0
 import time
 
 import logging
 import os
 logger = logging.getLogger(__name__)
-
-
 
 DEVICE = "cuda" # "cuda" -> Nvidia GPU, "mps" --> Mac GPU
 

@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_REGISTRY: dict[str, tuple[str, str]] = {
     "BASE": ("credit.datasets.base_dataset", "BaseDataset"),  # placeholders / testing
     "LOCAL": ("credit.datasets.local", "LocalDataset"),
+    "RMOM6": ("credit.datasets.rmom6", "RegionalMOM6Dataset"),
     "ARCO_ERA5": ("credit.datasets.era5", "ARCOERA5Dataset"),
     "WEATHERBENCH2_ERA5": ("credit.datasets.era5", "WeatherBench2ERA5Dataset"),
     "MRMS": ("credit.datasets.mrms", "MRMSDataset"),

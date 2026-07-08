@@ -10,6 +10,10 @@ from credit.postblock.square import SquareTransform
 from credit.postblock.gen1 import TracerFixer, GlobalMassFixer, GlobalWaterFixer, GlobalEnergyFixer
 from credit.postblock.geopotential import GeopotentialDiagnostic
 
+from credit.postblock.ocean_wet_mask import OceanWetMask
+from credit.postblock.ocean_clamp import OceanClamp
+from credit.postblock.ocean_density import OceanDensity
+
 POSTBLOCK_REGISTRY = {
     "reconstruct": Reconstruct,
     "bridgescaler_transform": BridgeScalerTransform,
@@ -22,6 +26,9 @@ POSTBLOCK_REGISTRY = {
     "global_water_fixer": GlobalWaterFixer,
     "global_energy_fixer": GlobalEnergyFixer,
     "geopotential_diagnostic": GeopotentialDiagnostic,
+    "ocean_wet_mask": OceanWetMask,
+    "ocean_clamp": OceanClamp,
+    "ocean_density": OceanDensity,
 }
 
 _VALID_SECTIONS = {"per_step", "post_rollout"}

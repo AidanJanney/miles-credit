@@ -1,0 +1,254 @@
+# ------------------------------------------------------------------------------------------------- #
+# Regional MOM6 ocean emulator — CREDIT gen2 config
+#
+# Demonstrates the migrated ocean pipeline:
+#   * data.source.rMOM6            -> credit/datasets/rmom6.py  (RegionalMOM6Dataset)
+#   * preblocks                    -> normalize + fill land NaNs + concat
+#   * postblocks                   -> reconstruct + denormalize + clamp + wet-mask + density
+#
+# This is a TEMPLATE. Sections marked "USER:" need real paths / geometry before running.
+# Offline preprocessing (grid interp, boundary baking, stats generation) is described in
+# OCEAN_MIGRATION_NOTES.md and must be done first.
+# ------------------------------------------------------------------------------------------------- #
+
+save_loc: '/glade/derecho/scratch/$USER/CREDIT_runs/rmom6_regional'
+seed: 1000
+
+
+# ---- USER: training data ---- #
+data:
+  source:
+    rMOM6:
+      dataset_type: "rmom6"
+      level_coord: "zl"
+      # levels: null  -> use all 65 zl layers. Provide a subset (in metres, nearest-matched)
+      #                  to train a shallower upper-ocean model, e.g. the first ~15 layers.
+      levels: null
+      # Canonical name -> file-native name. MOM6 stores potential temp as `temp`,
+      # salinity as `salt`; the rest already match.
+      rename:
+        thetao: temp
+        so: salt
+      variables:
+        # Prognostic: predicted and fed back as input each step.
+        prognostic:
+          vars_3D: [ 'uo', 'vo', 'thetao', 'so' ]
+          vars_2D: [ 'SSH' ]
+          path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.credit_ocean_state.nc'
+
+        # Dynamic forcing: time-varying inputs, never predicted.
+        # NOTE: open boundary conditions (north/east nudging) should be baked into
+        # full-domain forcing fields offline and added to this list (see notes).
+        dynamic_forcing:
+          vars_2D: [ 'taux', 'tauy', 'net_heat_surface', 'p_surf', 'precip' ]
+          path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.credit_fluxes.nc'
+
+        # Static: time-invariant geometry inputs, never predicted.
+        static:
+          vars_2D: [ 'deptho', 'wet' ]
+          path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.static.nc'
+
+  start_datetime: "1999-12-30 12:00:00"   # sample files hold 5 daily noon steps
+  end_datetime:   "2000-01-03 12:00:00"   # widen to your real archive for production
+  timestep: "1d"
+
+  history_len: 1
+  forecast_len: 1
+  valid_history_len: 1
+  valid_forecast_len: 1
+
+  one_shot: True
+  lead_time_periods: 1
+  skip_periods: null
+  static_first: True
+  scaler_type: 'std_new'
+
+  # USER: per-variable mean/std stats (generated offline, keyed by variable name).
+  mean_path: '/glade/derecho/scratch/$USER/rmom6_stats/ocean_mean.nc'
+  std_path:  '/glade/derecho/scratch/$USER/rmom6_stats/ocean_std.nc'
+
+
+# ---- USER: validation data (same source, later dates) ---- #
+validation_data:
+  source:
+    rMOM6_valid:
+      dataset_type: "rmom6"
+      level_coord: "zl"
+      levels: null
+      rename: { thetao: temp, so: salt }
+      variables:
+        prognostic:
+          vars_3D: [ 'uo', 'vo', 'thetao', 'so' ]
+          vars_2D: [ 'SSH' ]
+          path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.credit_ocean_state.nc'
+        dynamic_forcing:
+          vars_2D: [ 'taux', 'tauy', 'net_heat_surface', 'p_surf', 'precip' ]
+          path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.credit_fluxes.nc'
+        static:
+          vars_2D: [ 'deptho', 'wet' ]
+          path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.static.nc'
+  start_datetime: "1999-12-30 12:00:00"   # sample files hold 5 daily noon steps
+  end_datetime:   "2000-01-03 12:00:00"   # widen to your real archive for production
+  timestep: "1d"
+  history_len: 1
+  forecast_len: 1
+
+
+# ------------------------------------------------------------------------------------------------- #
+# PREBLOCKS — build the model input tensor from the nested per-variable dict.
+#   normalize (mean/std) -> fill land NaNs with 0 -> concat to (B, C, H, W)
+# ------------------------------------------------------------------------------------------------- #
+preblocks:
+  per_step:
+    normalize:
+      type: bridgescaler_transform   # standard scaler == per-variable z-score (mean/std)
+      args:
+        scaler_path: '/glade/derecho/scratch/$USER/rmom6_stats/ocean_bridgescaler.json'
+        variables: []                # [] = all variables
+        method: transform
+        scaler_type: standard
+    fill_land:
+      type: fill_values              # replace land NaNs with 0 after normalization
+      args:
+        variables: []                # [] = all variables
+        rules:
+          - { search: "nan", fill: 0.0 }
+    concat:
+      type: concat
+
+
+# ------------------------------------------------------------------------------------------------- #
+# POSTBLOCKS — split model output back to per-variable dict, return to physical units,
+# then apply ocean physics: clamp -> wet-mask -> diagnose density.
+#
+# NOTE: Reconstruct DETACHES y_processed, so these blocks shape rollout feed-back and
+# written outputs, NOT the single-step training gradient (see OCEAN_MIGRATION_NOTES.md).
+# ------------------------------------------------------------------------------------------------- #
+postblocks:
+  per_step:
+    reconstruct:
+      type: reconstruct
+    denorm:
+      type: bridgescaler_transform   # inverse of the preblock, SAME scaler file
+      args:
+        scaler_path: '/glade/derecho/scratch/$USER/rmom6_stats/ocean_bridgescaler.json'
+        variables: []
+        method: inverse_transform
+    clamp:
+      type: ocean_clamp              # physical bounds (physical units, so after denorm)
+      args:
+        bounds:
+          "rMOM6/prognostic/3d/so":     [ 0.0,  45.0 ]
+          "rMOM6/prognostic/3d/thetao": [ -2.0, 40.0 ]
+          "rMOM6/prognostic/3d/uo":     [ -5.0, 5.0 ]
+          "rMOM6/prognostic/3d/vo":     [ -5.0, 5.0 ]
+          "rMOM6/prognostic/2d/SSH":    [ -5.0, 5.0 ]
+    wet_mask:
+      type: ocean_wet_mask           # zero land points using static geometry
+      args:
+        static_path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.static.nc'
+        # zl layer depths are not in the static file; read them from the state file
+        # (or pass level_depths: [ ... ] explicitly).
+        level_source_path: '/glade/work/ajanney/Regional_Ocean_Emulation/archive/DataLoader_Input/CREDIT_Input.mom6.h.credit_ocean_state.nc'
+        level_var: "zl"
+        levels: null
+  post_rollout:
+    density:
+      type: ocean_density            # diagnose seawater potential density from theta, S
+      args:
+        theta_var:  "rMOM6/prognostic/3d/thetao"
+        salt_var:   "rMOM6/prognostic/3d/so"
+        output_var: "rMOM6/diagnostic/3d/rho"
+        enforce_stability: false     # experimental; see notes before enabling
+
+
+# ---- Training ---- #
+trainer:
+  type: era5-gen2
+  parallelism:
+    data: ddp
+    tensor: 1
+    domain: 1
+  activation_checkpoint: True
+  load_weights: False
+
+  train_batch_size: 1
+  valid_batch_size: 1
+  thread_workers: 4
+  valid_thread_workers: 4
+  prefetch_factor: 2
+
+  start_epoch: 0
+  num_epoch: 5
+  epochs: 20
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  amp: False
+  grad_accum_every: 1
+  grad_max_norm: 'dynamic'
+
+  scheduler:
+    scheduler_type: cosine-annealing
+    T_max: 20
+    eta_min: 1.0e-6
+
+
+# ---- USER: model geometry. TUNE THESE to the regional grid (H=457 yh, W=759 xh). ---- #
+# wxformer window/padding sizes must divide the padded spatial dims at each stage.
+# The values below are placeholders — validate against a forward pass on the real grid
+# (see OCEAN_MIGRATION_NOTES.md, test T5).
+model:
+  type: "wxformer"
+  frames: 1
+  image_height: 457
+  image_width: 759
+  levels: 65                 # match data levels (65 zl layers, or your subset count)
+  channels: 4                # 3D prognostic vars (uo, vo, thetao, so)
+  surface_channels: 1        # 2D prognostic vars (SSH)
+  input_only_channels: 7     # dynamic_forcing (5) + static (2)
+  output_only_channels: 0    # diagnostic prognostic targets (none predicted directly)
+
+  patch_width: 1
+  patch_height: 1
+  frame_patch_size: 1
+  dim: [ 32, 64, 128, 256 ]
+  depth: [ 2, 2, 8, 2 ]
+  global_window_size: [ 8, 4, 2, 1 ]
+  local_window_size: 4
+  cross_embed_kernel_sizes:
+    - [ 4, 8, 16, 32 ]
+    - [ 2, 4 ]
+    - [ 2, 4 ]
+    - [ 2, 4 ]
+  cross_embed_strides: [ 2, 2, 2, 2 ]
+  attn_dropout: 0.
+  ff_dropout: 0.
+  interp: False
+  use_spectral_norm: True
+  upsample_with_ps: True
+  padding_conf:
+    activate: True
+    mode: mirror             # regional (non-periodic) domain -> mirror, not earth/spherical
+    pad_lat: [ 0, 0 ]        # USER: set so padded H,W divide the window/stride stack
+    pad_lon: [ 0, 0 ]
+
+
+# ---- Loss ---- #
+loss:
+  training_loss: "mse"
+  use_power_loss: False
+  use_spectral_loss: False
+  use_latitude_weights: False    # regional ocean grid; disable global lat weighting
+  use_variable_weights: False
+
+
+pbs:
+  conda: "credit-derecho"
+  project: "NAML0001"
+  job_name: "rmom6_regional"
+  walltime: "12:00:00"
+  nodes: 1
+  ncpus: 64
+  ngpus: 1
+  mem: '480GB'
+  queue: 'main'

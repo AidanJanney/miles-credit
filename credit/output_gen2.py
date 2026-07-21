@@ -19,6 +19,7 @@ Zarr stores are appended step-by-step (no in-memory buffer required).
 NetCDF is buffered per period and written in bulk at each calendar boundary.
 """
 
+import glob
 import logging
 import os
 import traceback
@@ -30,6 +31,8 @@ import pandas as pd
 import tqdm
 import xarray as xr
 import yaml
+
+from credit.datasets._utils import _path_template_to_glob
 
 logger = logging.getLogger(__name__)
 
@@ -391,7 +394,15 @@ class ForecastWriter:
         return ds
 
     def _init_coords(self, y_processed: dict) -> dict:
-        """Build lat/lon/level arrays from model config, falling back to tensor shape."""
+        """Build lat/lon/level arrays from real source coordinates, falling back to a
+        placeholder global equirectangular grid derived from model config / tensor shape.
+
+        A source opts in to real coordinates by setting ``lat_coord``/``lon_coord`` in its
+        ``data.source.<name>`` config block (mirroring the existing ``level_coord`` key) to
+        the coordinate names in its own data files, e.g. ``lat_coord: yh, lon_coord: xh``
+        for a regional MOM6 source. Sources that don't set these (e.g. existing ERA5 configs)
+        keep today's linspace placeholder behavior unchanged.
+        """
         model_conf = self._conf.get("model", {})
         H = model_conf.get("image_height")
         W = model_conf.get("image_width")
@@ -412,7 +423,48 @@ class ForecastWriter:
             lvs = src_conf.get("levels")
             source_levels[src_name] = np.array(lvs) if lvs else np.array([])
 
+            lat_coord, lon_coord = src_conf.get("lat_coord"), src_conf.get("lon_coord")
+            if lat_coord and lon_coord:
+                real = self._read_real_coords(src_name, src_conf, lat_coord, lon_coord)
+                if real is not None:
+                    lat, lon = real
+
         return {"latitude": lat, "longitude": lon, "levels": source_levels}
+
+    @staticmethod
+    def _read_real_coords(
+        src_name: str, src_conf: dict, lat_coord: str, lon_coord: str
+    ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """Read real 1D lat/lon coordinate arrays from one of source's data files.
+
+        Tries each field type's path in turn (prognostic first, since it's the one every
+        source has); each path may be a %Y-style template, a glob, or a literal file/store,
+        matching the conventions data.source.<name>.variables.<field_type>.path already uses
+        elsewhere in the pipeline.
+        """
+        variables = src_conf.get("variables", {})
+        for field_type in ("prognostic", "static", "dynamic_forcing", "diagnostic"):
+            path = variables.get(field_type, {}).get("path")
+            if not path:
+                continue
+            pattern = _path_template_to_glob(os.path.expandvars(path))
+            matches = sorted(glob.glob(pattern))
+            if not matches:
+                continue
+            try:
+                with xr.open_dataset(matches[0]) as ds:
+                    if lat_coord in ds.coords and lon_coord in ds.coords:
+                        return ds[lat_coord].values.copy(), ds[lon_coord].values.copy()
+            except Exception:
+                logger.warning("ForecastWriter: failed to read coords from %s", matches[0], exc_info=True)
+        logger.warning(
+            "ForecastWriter: source '%s' set lat_coord=%r/lon_coord=%r but no data file with "
+            "those coordinates was found; falling back to the placeholder global grid.",
+            src_name,
+            lat_coord,
+            lon_coord,
+        )
+        return None
 
     # ------------------------------------------------------------------
     # Encoding and metadata

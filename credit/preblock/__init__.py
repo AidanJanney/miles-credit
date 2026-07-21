@@ -8,6 +8,7 @@ from credit.preblock.concat import ConcatToTensor
 from credit.preblock.norm import ERA5Normalizer
 from credit.preblock.fill_values import FillValues
 from credit.preblock.scaler import BridgeScalerTransform
+from credit.preblock.pointwise_scaler import PointwiseScalerTransform
 
 
 PREBLOCK_REGISTRY = {
@@ -18,6 +19,7 @@ PREBLOCK_REGISTRY = {
     "era5_normalizer": ERA5Normalizer,
     "fill_values": FillValues,
     "bridgescaler_transform": BridgeScalerTransform,
+    "pointwise_scaler": PointwiseScalerTransform,
 }
 
 _VALID_SECTIONS = {"ic_only", "per_step"}
@@ -86,8 +88,21 @@ def _run_preblock_group(group: nn.ModuleDict, batch: dict, device=None):
     """Sequentially applies a group of preblocks, returning the transformed batch."""
     meta = None
     target = None
-    to_device = True
-    concat_ran = False
+
+    concat = next((p for p in group.values() if isinstance(p, ConcatToTensor)), None)
+    concat_ran = concat is not None
+    to_device = concat.to_device if concat is not None else True
+
+    # Move the sample to the accelerator BEFORE the blocks run, not after concat. Every block
+    # here (scaler, pointwise_scaler, fill_values) is elementwise and device-agnostic, but on
+    # the host they run over ~5e8 values per batch inside the training loop: benchmarked at 12%
+    # of a regional-ocean iteration, against 6% for the entire model forward+backward.
+    # Only "input"/"target" move -- "metadata" holds datetimes and the channel map, which
+    # ConcatToTensor and the postblocks read with pandas/plain Python, not torch.
+    if device is not None and to_device and concat_ran:
+        batch = {
+            k: (_move_batch_to_device(v, device) if k in ("input", "target") else v) for k, v in batch.items()
+        }
 
     for preblock in group.values():
         result = preblock(batch)
@@ -98,9 +113,6 @@ def _run_preblock_group(group: nn.ModuleDict, batch: dict, device=None):
                 batch, meta = result
         else:
             batch = result
-        if isinstance(preblock, ConcatToTensor):
-            to_device = preblock.to_device
-            concat_ran = True
 
     if not concat_ran:
         return batch

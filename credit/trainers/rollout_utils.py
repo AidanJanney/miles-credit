@@ -226,8 +226,9 @@ def assemble_rollout_batch(full_data_dict: dict, curr_batch: dict) -> dict:
             dynamic forcing fields and the training target.
 
     Returns:
-        dict with keys ``"input"`` (nested source→var dict) and ``"target"``
-        (from ``curr_batch``), ready for ``apply_preblocks(step_preblocks, ...)``.
+        dict with keys ``"input"`` (nested source→var dict), ``"target"`` (from
+        ``curr_batch``), and ``"metadata"`` (also from ``curr_batch`` -- the current step's
+        real datetimes), ready for ``apply_preblocks(step_preblocks, ...)``.
 
     Raises:
         TypeError: if ``full_data_dict["y_processed"]`` is not a dict, which
@@ -283,4 +284,11 @@ def assemble_rollout_batch(full_data_dict: dict, curr_batch: dict) -> dict:
     return {
         "input": assembled_input,
         "target": curr_batch.get("target"),
+        # Forward the current step's real metadata (datetimes) through -- without this,
+        # ConcatToTensor never sees a top-level "metadata" key at t>1 and
+        # batch_dict["metadata"]["target"][source]["datetime"] silently stays absent for the
+        # rest of the rollout (it's only ever populated from the t=0/IC batch). Needed by any
+        # postblock that must know the current step's real calendar time (e.g. an OBC nudge
+        # block matching lead time against an external boundary-condition file).
+        "metadata": curr_batch.get("metadata"),
     }

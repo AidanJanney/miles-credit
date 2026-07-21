@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 from bridgescaler import load_scaler_dict, scale_var_dict
 from bridgescaler.distributed_tensor import DStandardScalerTensor, DQuantileScalerTensor, DMinMaxScalerTensor
@@ -5,6 +7,12 @@ from credit.preblock.base import BasePreblock
 from os.path import exists, expandvars
 from os import makedirs
 from ._utils import _parse_variable_selection
+
+# bridgescaler calls warnings.simplefilter("always") at import time, so this benign warning
+# (one DStandardScalerTensor per var_key here, keyed on that variable's own level axis --
+# fit-time and transform-time level order are guaranteed consistent by our own --levels
+# convention, see scripts/build_rmom6_scaler.py) would otherwise repeat on every forward call.
+warnings.filterwarnings("ignore", message="Input data lacks variable names", module=r"bridgescaler\..*")
 
 _SCALER_REGISTRY = {
     "standard": DStandardScalerTensor,

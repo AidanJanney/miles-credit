@@ -1,0 +1,313 @@
+# ------------------------------------------------------------------------------------------------- #
+# Regional MOM6 ocean emulator — EXPERIMENT: levelwise normalization x single-step training x
+# tendency normalization OFF
+#
+# One of 8 configs in the pointwise/levelwise x singlestep/multistep x tendency-on/off grid —
+# see EXPERIMENT_DESIGN.md at the repo root for the full design and the commands used to build
+# every input this config points at. Derived from config/rmom6_regional.yml (see that file for
+# the pipeline overview); differences from it:
+#   - 25 vertical levels: preprocess_rmom6.py --level-pairs thickness-weighted-averages
+#     each adjacent pair of the native 50 z1_l layers down to 25 (every native layer
+#     contributes -- not a sparse selection). See that script's module docstring.
+#   - Normalization: LEVELWISE variant, per-(variable, level) mean/std (bridgescaler "standard"
+#     scaler). Built by scripts/build_rmom6_scaler.py.
+#   - TENDENCY NORMALIZATION: OFF — plain std, no xi rescaling (scaler built with --no-xi).
+#     Identical to the `_tendency` sibling config otherwise, which instead pre-scales std by xi
+#     (CREDIT-style residual/xi tendency normalization, Schreck et al. 2024, Sec 3.3).
+#   - forecast_len: 1 -> single-step (pushforward) training.
+#   - dynamic_forcing includes `runoff` (friver) in addition to taux/tauy/net_heat_surface.
+#   - Clamping is unchanged from config/rmom6_regional.yml: postblocks.per_step.clamp only
+#     shapes rollout feedback / written output (Reconstruct detaches y_processed before it
+#     runs), never the training gradient — see OCEAN_MIGRATION_NOTES.md §2.
+#
+# This config is the 60-day DEV-scale resource-usage test (2000-01-01..2000-02-29, 40 train / 20 valid days) -- a single non-chained PBS job, not the full 20-year run yet. To graduate
+# 2000-2019 run, see EXPERIMENT_DESIGN.md's "Graduating to the full run" section.
+# ------------------------------------------------------------------------------------------------- #
+
+save_loc: '/glade/derecho/scratch/$USER/CREDIT_runs/rmom6_regional_levelwise_singlestep_notendency_full'
+seed: 1000
+
+
+# ---- USER: training data ---- #
+data:
+  source:
+    rMOM6:
+      dataset_type: "rmom6"
+      level_coord: "z1_l"
+      # levels: null -> use whatever levels are baked into the preprocessed store. The
+      # full 2000-2019 archive, built per-year with preprocess_rmom6.py --level-pairs (25
+      # thickness-merged levels), so this already means "the 25 merged levels".
+      levels: null
+      variables:
+        prognostic:
+          vars_3D: [ 'uo', 'vo', 'thetao', 'so' ]
+          vars_2D: [ 'SSH' ]
+          # 25-level sample, built with:
+          #   python scripts/preprocess_rmom6.py --start-date 2000-01-01 --end-date 2000-03-01 \
+          #     (see scripts/derecho_preprocess_rmom6.py)
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_prognostic_%Y.zarr'
+        dynamic_forcing:
+          vars_2D: [ 'taux', 'tauy', 'net_heat_surface', 'runoff' ]
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_forcing_%Y.zarr'
+        static:
+          vars_2D: [ 'deptho', 'wet' ]
+          path: '/glade/derecho/scratch/ajanney/archive/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/ocn/hist/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM.mom6.h.static.nc'
+
+  # DEV-scale train window: a slice of the full 2000-2019 level-paired archive (see dates below).
+  start_datetime: "2000-01-01 12:00:00"
+  end_datetime:   "2017-12-31 12:00:00"
+  timestep: "1d"
+
+  history_len: 1
+  forecast_len: 1              # SINGLE-STEP: one pushforward step per training sample
+  valid_history_len: 1
+  valid_forecast_len: 1
+
+  one_shot: True
+  lead_time_periods: 1
+  skip_periods: null
+  static_first: True
+
+
+# ---- USER: validation data ---- #
+validation_data:
+  source:
+    rMOM6:
+      dataset_type: "rmom6"
+      level_coord: "z1_l"
+      levels: null
+      variables:
+        prognostic:
+          vars_3D: [ 'uo', 'vo', 'thetao', 'so' ]
+          vars_2D: [ 'SSH' ]
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_prognostic_%Y.zarr'
+        dynamic_forcing:
+          vars_2D: [ 'taux', 'tauy', 'net_heat_surface', 'runoff' ]
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_forcing_%Y.zarr'
+        static:
+          vars_2D: [ 'deptho', 'wet' ]
+          path: '/glade/derecho/scratch/ajanney/archive/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/ocn/hist/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM.mom6.h.static.nc'
+  # DEV-scale valid window: a slice of the full 2000-2019 level-paired archive (see dates below).
+  start_datetime: "2018-01-01 12:00:00"
+  end_datetime:   "2019-12-20 12:00:00"
+  timestep: "1d"
+  history_len: 1
+  forecast_len: 1
+  valid_history_len: 1
+  valid_forecast_len: 1
+  one_shot: True
+  lead_time_periods: 1
+  skip_periods: null
+  static_first: True
+
+
+# ------------------------------------------------------------------------------------------------- #
+# PREBLOCKS — normalize (LEVELWISE, no xi -- tendency off, bridgescaler) -> fill land NaNs -> concat.
+# ------------------------------------------------------------------------------------------------- #
+preblocks:
+  per_step:
+    normalize:
+      type: bridgescaler_transform
+      args:
+        # Built by: python scripts/build_rmom6_scaler.py --level-pairs --no-xi \
+        #   --out .../ocean_bridgescaler_levelwise_notendency_levelpairs.json
+        # Plain std, NOT scaled by xi -- tendency normalization off. See build_rmom6_scaler.py's
+        # module docstring / --no-xi help text.
+        scaler_path: '/glade/derecho/scratch/$USER/rmom6_regional/scaler/ocean_bridgescaler_levelwise_notendency_levelpairs.json'
+        variables:
+          - "rMOM6/prognostic/3d/thetao"
+          - "rMOM6/prognostic/3d/so"
+          - "rMOM6/prognostic/3d/uo"
+          - "rMOM6/prognostic/3d/vo"
+          - "rMOM6/prognostic/2d/SSH"
+        method: transform
+        scaler_type: standard
+    fill_land:
+      type: fill_values
+      args:
+        variables: []
+        rules:
+          - { search: "nan", fill: 0.0 }
+    concat:
+      type: concat
+
+
+# ------------------------------------------------------------------------------------------------- #
+# POSTBLOCKS — reconstruct -> denormalize (LEVELWISE, no xi, SAME scaler as preblock) -> clamp
+# (unchanged: shapes rollout feedback / output only, not the training gradient -- see
+# OCEAN_MIGRATION_NOTES.md) -> wet-mask -> density.
+# ------------------------------------------------------------------------------------------------- #
+postblocks:
+  per_step:
+    reconstruct:
+      type: reconstruct
+    denorm:
+      type: bridgescaler_transform
+      args:
+        scaler_path: '/glade/derecho/scratch/$USER/rmom6_regional/scaler/ocean_bridgescaler_levelwise_notendency_levelpairs.json'
+        variables: []
+        method: inverse_transform
+    clamp:
+      type: ocean_clamp
+      args:
+        bounds:
+          "rMOM6/prognostic/3d/so":     [ 0.0,  45.0 ]
+          "rMOM6/prognostic/3d/thetao": [ -2.0, 40.0 ]
+          "rMOM6/prognostic/3d/uo":     [ -5.0, 5.0 ]
+          "rMOM6/prognostic/3d/vo":     [ -5.0, 5.0 ]
+          "rMOM6/prognostic/2d/SSH":    [ -5.0, 5.0 ]
+    wet_mask:
+      type: ocean_wet_mask
+      args:
+        static_path: '/glade/derecho/scratch/ajanney/archive/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/ocn/hist/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM.mom6.h.static.nc'
+        level_source_path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_prognostic_2000.zarr'
+        level_var: "z1_l"
+        levels: null
+    obc_nudge:
+      type: ocean_obc_nudge
+      args:
+        # Naive placeholder: overwrites the outer edge ring of thetao/so/uo/vo/SSH with the
+        # prescribed OBC value at each step's real timestamp (see scripts/preprocess_obcs.py).
+        # NOT a proper sponge layer -- see OCEAN_MIGRATION_NOTES.md for the planned dedicated
+        # OBC input pathway that should replace this.
+        obc_paths:
+          north: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_north.zarr'
+          south: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_south.zarr'
+          east: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_east.zarr'
+          west: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_west.zarr'
+        variables:
+          - "rMOM6/prognostic/3d/thetao"
+          - "rMOM6/prognostic/3d/so"
+          - "rMOM6/prognostic/3d/uo"
+          - "rMOM6/prognostic/3d/vo"
+          - "rMOM6/prognostic/2d/SSH"
+        levels: null  # level-pairs: model already uses all 25 merged levels, no subset to nearest-match
+  post_rollout:
+    density:
+      type: ocean_density
+      args:
+        theta_var:  "rMOM6/prognostic/3d/thetao"
+        salt_var:   "rMOM6/prognostic/3d/so"
+        output_var: "rMOM6/diagnostic/3d/rho"
+        enforce_stability: false
+
+
+# ---- Training ---- #
+trainer:
+  type: era5-gen2
+  parallelism:
+    data: ddp
+    tensor: 1
+    domain: 1
+  activation_checkpoint: True
+  load_weights: False
+
+  train_batch_size: 16
+  valid_batch_size: 1
+  batches_per_epoch: 10       # steady-state ~30-50s/iter after a slow first iter, but a full 52-iter epoch x10 still too long
+  valid_batches_per_epoch: 5
+  thread_workers: 8
+  valid_thread_workers: 8
+  prefetch_factor: 1
+
+  start_epoch: 0
+  num_epoch: 10                 # real training length -- new chunking/OBC-preload pipeline is far faster
+  epochs: 20
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  amp: False
+  grad_accum_every: 1
+  grad_max_norm: 'dynamic'
+
+  use_scheduler: True
+  scheduler:
+    scheduler_type: cosine-annealing
+    T_max: 20
+    eta_min: 1.0e-6
+
+
+# ---- USER: model geometry. ---- #
+model:
+  type: "wxformer"
+  frames: 1
+  image_height: 457
+  image_width: 759
+  levels: 25                 # 25 level-pairs-merged levels (was 50 native) -- see preprocess_rmom6.py
+  channels: 4                 # 3D prognostic vars (uo, vo, thetao, so)
+  surface_channels: 1         # 2D prognostic vars (SSH)
+  input_only_channels: 6      # dynamic_forcing (4: taux, tauy, net_heat_surface, runoff) + static (2)
+  output_only_channels: 0
+
+  patch_width: 1
+  patch_height: 1
+  frame_patch_size: 1
+  dim: [ 32, 64, 128, 256 ]
+  depth: [ 2, 2, 8, 2 ]
+  global_window_size: [ 8, 4, 2, 1 ]
+  local_window_size: 4
+  cross_embed_kernel_sizes:
+    - [ 4, 8, 16, 32 ]
+    - [ 2, 4 ]
+    - [ 2, 4 ]
+    - [ 2, 4 ]
+  cross_embed_strides: [ 2, 2, 2, 2 ]
+  attn_dropout: 0.
+  ff_dropout: 0.
+  interp: False
+  use_spectral_norm: True
+  upsample_with_ps: True
+  padding_conf:
+    activate: True
+    mode: mirror
+    # Unaffected by the level count (levels only affect channel count, not H/W padding) --
+    # verified with a real forward pass on this grid, see config/rmom6_regional.yml's note.
+    pad_lat: [ 28, 27 ]      # sum 55 -> 512
+    pad_lon: [ 5, 4 ]        # sum 9  -> 768
+
+
+# ---- Loss ---- #
+loss:
+  training_loss: "mse"
+  validation_loss: "mse"
+  use_power_loss: False
+  use_spectral_loss: False
+  use_latitude_weights: False
+  use_variable_weights: False
+
+
+# ---- USER: rollout / inference ---- #
+inference:
+  run_mode: single
+  mode: none
+  save_forecast: '/glade/derecho/scratch/$USER/CREDIT_runs/rmom6_regional_levelwise_singlestep_notendency_full/rollout'
+
+  single_forecast:
+    forecast_length: "14d"
+    start_datetime: "2000-01-01 12:00:00"
+
+  output:
+    format: netcdf
+    output_interval: null
+    group_by: full
+    variables: null
+    metadata: null
+    encoding:
+      dtype: float32
+      zlib: true
+      complevel: 4
+
+
+# Sized to match the current interactive job (8 cores, 128GB, 1 A100 on Casper) -- see
+# weatherbench2_era5_wxformer_tiny.yml for the same casper pbs convention. The smoke test is
+# run directly with `credit train -c ...` in that interactive session; this block is for later
+# batch submission (`credit submit --cluster casper -c ...`).
+pbs:
+  conda: "miles-credit-derecho"
+  project: "p93300012"
+  job_name: "rmom6_levelwise_singlestep_notendency_full_timing"
+  walltime: "04:00:00"
+  nodes: 2
+  ncpus: 64
+  ngpus: 4
+  mem: '480GB'
+  queue: 'main'

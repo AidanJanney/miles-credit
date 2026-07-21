@@ -1,3 +1,4 @@
+import warnings
 from os.path import expandvars
 
 from bridgescaler import load_scaler_dict, scale_var_dict
@@ -5,6 +6,11 @@ from credit.postblock.base import BasePostblock
 from credit.preblock._utils import (
     _parse_variable_selection,
 )  # shared utility — lives in preblock but used by both pre and postblocks
+
+# See credit/preblock/scaler.py's matching filter for why this is safe to silence here:
+# bridgescaler resets warnings.simplefilter("always") at import time, so this otherwise
+# repeats every forward call; harmless for our one-scaler-per-variable usage.
+warnings.filterwarnings("ignore", message="Input data lacks variable names", module=r"bridgescaler\..*")
 
 
 class BridgeScalerTransform(BasePostblock):

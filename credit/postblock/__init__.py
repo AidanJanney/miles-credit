@@ -3,6 +3,7 @@ import torch.nn as nn
 from credit.postblock.reconstruct import Reconstruct
 from credit.postblock.wet_mask_samudra import WetMaskBlock
 from credit.postblock.scaler import BridgeScalerTransform
+from credit.postblock.pointwise_scaler import PointwiseScalerTransform
 from credit.postblock.mslp import MSLPDiagnostic
 from credit.postblock.exp import ExpTransform
 from credit.postblock.square import SquareTransform
@@ -13,6 +14,7 @@ from credit.postblock.geopotential import GeopotentialDiagnostic
 from credit.postblock.ocean_wet_mask import OceanWetMask
 from credit.postblock.ocean_clamp import OceanClamp
 from credit.postblock.ocean_density import OceanDensity
+from credit.postblock.ocean_obc_nudge import OceanOBCNudge
 
 POSTBLOCK_REGISTRY = {
     "reconstruct": Reconstruct,
@@ -29,6 +31,8 @@ POSTBLOCK_REGISTRY = {
     "ocean_wet_mask": OceanWetMask,
     "ocean_clamp": OceanClamp,
     "ocean_density": OceanDensity,
+    "ocean_obc_nudge": OceanOBCNudge,
+    "pointwise_scaler": PointwiseScalerTransform,
 }
 
 _VALID_SECTIONS = {"per_step", "post_rollout"}

@@ -157,7 +157,7 @@ def main_cli():
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{local_rank % torch.cuda.device_count()}")
         torch.cuda.set_device(local_rank % torch.cuda.device_count())
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = os.environ.get("CREDIT_DEBUG_NO_CUDNN_BENCHMARK") != "1"
     else:
         device = torch.device("cpu")
 

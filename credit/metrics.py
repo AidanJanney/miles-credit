@@ -58,6 +58,7 @@ class LatWeightedMetrics:
         # Get latitude and variable weights
         w_lat = self._get_w_lat(pred)
         w_var = self.w_var.to(dtype=pred.dtype, device=pred.device) if self.w_var is not None else 1.0
+        w = w_var * w_lat
 
         if clim is not None:
             clim = clim.to(device=y.device).unsqueeze(0)
@@ -75,37 +76,61 @@ class LatWeightedMetrics:
                 pred = pred.mean(dim=1)
 
             error = pred - y
+
+            # Add epsilon to avoid division by zero
+            epsilon = 1e-7
+
+            # Reduce over every dim except the channel dim (dim=1), batched across all
+            # variables at once instead of a Python loop with one GPU reduction (and,
+            # via the old .cpu().item() aggregation, one forced GPU sync) per variable.
+            # Same math as the loop version, just computed for all channels together.
+            dims_no_c = tuple(d for d in range(pred.dim()) if d != 1)
+
+            pred_prime = pred - pred.mean(dim=dims_no_c, keepdim=True)
+            y_prime = y - y.mean(dim=dims_no_c, keepdim=True)
+
+            denom = (
+                torch.sqrt(torch.sum(w * pred_prime**2, dim=dims_no_c) * torch.sum(w * y_prime**2, dim=dims_no_c))
+                + epsilon
+            )
+            acc = torch.sum(w * pred_prime * y_prime, dim=dims_no_c) / denom
+
+            # rmse: mean over (H, W) first (matching the loop version's dim=(-2, -1)
+            # inner mean), then mean over whatever dims remain except channel.
+            rmse_inner = torch.sqrt(torch.mean(error**2 * w, dim=(-2, -1)))
+            dims_no_c_reduced = tuple(d for d in range(rmse_inner.dim()) if d != 1)
+            rmse = rmse_inner.mean(dim=dims_no_c_reduced)
+
+            mse = torch.mean(error**2 * w, dim=dims_no_c)
+            mae = torch.mean(torch.abs(error) * w, dim=dims_no_c)
+
+            stacked = [acc, rmse, mse, mae]
+            if self.ensemble_size > 1:
+                std_inner = torch.sqrt(torch.mean(std_dev**2 * w, dim=(-2, -1)))
+                dims_no_c_std = tuple(d for d in range(std_inner.dim()) if d != 1)
+                stacked.append(std_inner.mean(dim=dims_no_c_std))
+
+            # Single GPU->CPU sync for everything, instead of one per variable per metric.
+            stacked_np = torch.stack(stacked).detach().cpu().numpy()
+            acc_vals, rmse_vals, mse_vals, mae_vals = stacked_np[0], stacked_np[1], stacked_np[2], stacked_np[3]
+            if self.ensemble_size > 1:
+                std_vals = stacked_np[4]
+
             for i, var in enumerate(self.vars):
-                pred_prime = pred[:, i] - torch.mean(pred[:, i])
-                y_prime = y[:, i] - torch.mean(y[:, i])
-
-                # Add epsilon to avoid division by zero
-                epsilon = 1e-7
-
-                denominator = (
-                    torch.sqrt(torch.sum(w_var * w_lat * pred_prime**2) * torch.sum(w_var * w_lat * y_prime**2))
-                    + epsilon
-                )
-
-                loss_dict[f"acc_{var}"] = torch.sum(w_var * w_lat * pred_prime * y_prime) / denominator
-                loss_dict[f"rmse_{var}"] = torch.mean(
-                    torch.sqrt(torch.mean(error[:, i] ** 2 * w_lat * w_var, dim=(-2, -1)))
-                )
-                loss_dict[f"mse_{var}"] = (error[:, i] ** 2 * w_lat * w_var).mean()
-                loss_dict[f"mae_{var}"] = (torch.abs(error[:, i]) * w_lat * w_var).mean()
-                # mean of std across all batches
+                loss_dict[f"acc_{var}"] = float(acc_vals[i])
+                loss_dict[f"rmse_{var}"] = float(rmse_vals[i])
+                loss_dict[f"mse_{var}"] = float(mse_vals[i])
+                loss_dict[f"mae_{var}"] = float(mae_vals[i])
                 if self.ensemble_size > 1:
-                    loss_dict[f"std_{var}"] = torch.mean(
-                        torch.sqrt(torch.mean(std_dev[:, i] ** 2 * w_lat * w_var, dim=(-2, -1)))
-                    )
+                    loss_dict[f"std_{var}"] = float(std_vals[i])
 
         # Calculate metrics averages
-        loss_dict["acc"] = np.mean([loss_dict[k].cpu().item() for k in loss_dict.keys() if "acc_" in k])
-        loss_dict["rmse"] = np.mean([loss_dict[k].cpu() for k in loss_dict.keys() if "rmse_" in k])
-        loss_dict["mse"] = np.mean([loss_dict[k].cpu() for k in loss_dict.keys() if "mse_" in k and "rmse_" not in k])
-        loss_dict["mae"] = np.mean([loss_dict[k].cpu() for k in loss_dict.keys() if "mae_" in k])
+        loss_dict["acc"] = float(np.mean(acc_vals))
+        loss_dict["rmse"] = float(np.mean(rmse_vals))
+        loss_dict["mse"] = float(np.mean(mse_vals))
+        loss_dict["mae"] = float(np.mean(mae_vals))
         if self.ensemble_size > 1:
-            loss_dict["std"] = np.mean([loss_dict[k].cpu() for k in loss_dict.keys() if "std_" in k])
+            loss_dict["std"] = float(np.mean(std_vals))
 
         return loss_dict
 

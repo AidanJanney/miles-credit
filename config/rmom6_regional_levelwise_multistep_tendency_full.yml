@@ -1,0 +1,303 @@
+# ------------------------------------------------------------------------------------------------- #
+# Regional MOM6 ocean emulator — FULL-SCALE TIMING TEST (levelwise x multistep x tendency ON)
+#
+# NOT a real training run yet -- num_epoch: 1 below is deliberate, so this job measures exactly
+# one real full epoch's wall-clock time on the actual 20-year dataset (train: 2000-2017, valid:
+# 2018-2019), at a "large" batch size (16/GPU) across a first real multi-node DDP test (2 nodes
+# x 4 A100s = 8 GPUs on Derecho -- Casper's `credit submit` path is single-node only, confirmed
+# in credit/cli/_submit.py; this is why this config's pbs: block targets Derecho specifically).
+# Chosen deliberately modest (2 nodes, not more) since multi-node has never been exercised in
+# this pipeline before -- validate correctness/scaling here before requesting more of the ~30
+# free A100 nodes reported available. See EXPERIMENT_DESIGN.md for the rest of the grid this is
+# derived from (rmom6_regional_levelwise_multistep_tendency.yml, the 60-day dev-scale sibling).
+#
+# PREREQUISITE: full 2000-2019 preprocessing must be done first --
+#   scripts/derecho_preprocess_rmom6.sh  (PBS array job, one sub-job per year)
+#   scripts/derecho_preprocess_obcs.sh   (single job, full OBC record)
+# Both must be submitted FROM Derecho (credit submit / qsub cannot reach Derecho's scheduler
+# from a Casper session) -- see EXPERIMENT_DESIGN.md for the exact commands.
+# ------------------------------------------------------------------------------------------------- #
+
+save_loc: '/glade/derecho/scratch/$USER/CREDIT_runs/rmom6_regional_levelwise_multistep_tendency_full'
+seed: 1000
+
+
+# ---- USER: training data ---- #
+data:
+  source:
+    rMOM6:
+      dataset_type: "rmom6"
+      level_coord: "z1_l"
+      levels: null              # store already holds only the 25 level-pairs-merged levels
+      variables:
+        prognostic:
+          vars_3D: [ 'uo', 'vo', 'thetao', 'so' ]
+          vars_2D: [ 'SSH' ]
+          # %Y-patterned -- LocalDataset globs rmom6_prognostic_<year>.zarr across the whole
+          # 2000-2019 archive built by scripts/derecho_preprocess_rmom6.sh.
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_prognostic_%Y.zarr'
+        dynamic_forcing:
+          vars_2D: [ 'taux', 'tauy', 'net_heat_surface', 'runoff' ]
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_forcing_%Y.zarr'
+        static:
+          vars_2D: [ 'deptho', 'wet' ]
+          path: '/glade/derecho/scratch/ajanney/archive/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/ocn/hist/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM.mom6.h.static.nc'
+
+  # Train: 2000-2017 (18 years). Valid: 2018-2019 (2 years, see validation_data below).
+  start_datetime: "2000-01-01 12:00:00"
+  end_datetime:   "2017-12-31 12:00:00"
+  timestep: "1d"
+
+  history_len: 1
+  forecast_len: 3              # MULTI-STEP: 3-day rollout per training sample
+  valid_history_len: 1
+  valid_forecast_len: 3
+
+  one_shot: True
+  lead_time_periods: 1
+  skip_periods: null
+  static_first: True
+
+
+# ---- USER: validation data ---- #
+validation_data:
+  source:
+    rMOM6:
+      dataset_type: "rmom6"
+      level_coord: "z1_l"
+      levels: null
+      variables:
+        prognostic:
+          vars_3D: [ 'uo', 'vo', 'thetao', 'so' ]
+          vars_2D: [ 'SSH' ]
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_prognostic_%Y.zarr'
+        dynamic_forcing:
+          vars_2D: [ 'taux', 'tauy', 'net_heat_surface', 'runoff' ]
+          path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_forcing_%Y.zarr'
+        static:
+          vars_2D: [ 'deptho', 'wet' ]
+          path: '/glade/derecho/scratch/ajanney/archive/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/ocn/hist/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM.mom6.h.static.nc'
+  # 2018-2019, leaving a 20-day margin before the archive's actual end (2019-12-31) so every
+  # valid_forecast_len=3 rollout sample has real data to roll into.
+  start_datetime: "2018-01-01 12:00:00"
+  end_datetime:   "2019-12-20 12:00:00"
+  timestep: "1d"
+  history_len: 1
+  forecast_len: 3
+  valid_history_len: 1
+  valid_forecast_len: 3
+  one_shot: True
+  lead_time_periods: 1
+  skip_periods: null
+  static_first: True
+
+
+# ------------------------------------------------------------------------------------------------- #
+# PREBLOCKS — normalize (LEVELWISE + xi, bridgescaler) -> fill land NaNs -> concat.
+# ------------------------------------------------------------------------------------------------- #
+preblocks:
+  per_step:
+    normalize:
+      type: bridgescaler_transform
+      args:
+        scaler_path: '/glade/derecho/scratch/$USER/rmom6_regional/scaler/ocean_bridgescaler_levelwise_xi_levelpairs.json'
+        variables:
+          - "rMOM6/prognostic/3d/thetao"
+          - "rMOM6/prognostic/3d/so"
+          - "rMOM6/prognostic/3d/uo"
+          - "rMOM6/prognostic/3d/vo"
+          - "rMOM6/prognostic/2d/SSH"
+        method: transform
+        scaler_type: standard
+    fill_land:
+      type: fill_values
+      args:
+        variables: []
+        rules:
+          - { search: "nan", fill: 0.0 }
+    concat:
+      type: concat
+
+
+# ------------------------------------------------------------------------------------------------- #
+# POSTBLOCKS — reconstruct -> denormalize (LEVELWISE + xi, SAME scaler as preblock) -> clamp
+# (unchanged: shapes rollout feedback / output only, not the training gradient -- see
+# OCEAN_MIGRATION_NOTES.md) -> wet-mask -> OBC nudge -> density.
+# ------------------------------------------------------------------------------------------------- #
+postblocks:
+  per_step:
+    reconstruct:
+      type: reconstruct
+    denorm:
+      type: bridgescaler_transform
+      args:
+        scaler_path: '/glade/derecho/scratch/$USER/rmom6_regional/scaler/ocean_bridgescaler_levelwise_xi_levelpairs.json'
+        variables: []
+        method: inverse_transform
+    clamp:
+      type: ocean_clamp
+      args:
+        bounds:
+          "rMOM6/prognostic/3d/so":     [ 0.0,  45.0 ]
+          "rMOM6/prognostic/3d/thetao": [ -2.0, 40.0 ]
+          "rMOM6/prognostic/3d/uo":     [ -5.0, 5.0 ]
+          "rMOM6/prognostic/3d/vo":     [ -5.0, 5.0 ]
+          "rMOM6/prognostic/2d/SSH":    [ -5.0, 5.0 ]
+    wet_mask:
+      type: ocean_wet_mask
+      args:
+        static_path: '/glade/derecho/scratch/ajanney/archive/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM/ocn/hist/carib12_runoff_tides_rmax600_f200_gioGlofas_gioNNSM.mom6.h.static.nc'
+        # A literal, already-existing file (2000 was processed first during timing tests) --
+        # only needs the z1_l coordinate, doesn't need to be the full %Y-patterned store.
+        level_source_path: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/rmom6_prognostic_2000.zarr'
+        level_var: "z1_l"
+        levels: null
+    obc_nudge:
+      type: ocean_obc_nudge
+      args:
+        # Naive placeholder: overwrites the outer edge ring of thetao/so/uo/vo/SSH with the
+        # prescribed OBC value at each step's real timestamp (see scripts/preprocess_obcs.py).
+        # NOT a proper sponge layer -- see OCEAN_MIGRATION_NOTES.md for the planned dedicated
+        # OBC input pathway that should replace this. Full (non-date-limited) OBC record, built
+        # by scripts/derecho_preprocess_obcs.sh.
+        obc_paths:
+          north: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_north.zarr'
+          south: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_south.zarr'
+          east: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_east.zarr'
+          west: '/glade/derecho/scratch/ajanney/rmom6_regional/preprocessed/obc_west.zarr'
+        variables:
+          - "rMOM6/prognostic/3d/thetao"
+          - "rMOM6/prognostic/3d/so"
+          - "rMOM6/prognostic/3d/uo"
+          - "rMOM6/prognostic/3d/vo"
+          - "rMOM6/prognostic/2d/SSH"
+        levels: null  # level-pairs: model already uses all 25 merged levels, no subset to nearest-match
+  post_rollout:
+    density:
+      type: ocean_density
+      args:
+        theta_var:  "rMOM6/prognostic/3d/thetao"
+        salt_var:   "rMOM6/prognostic/3d/so"
+        output_var: "rMOM6/diagnostic/3d/rho"
+        enforce_stability: false
+
+
+# ---- Training ---- #
+trainer:
+  type: era5-gen2
+  parallelism:
+    data: ddp
+    tensor: 1
+    domain: 1
+  activation_checkpoint: True
+  load_weights: False
+
+  train_batch_size: 16         # "large" batch -- batch=8/GPU measured 41% (33GB/80GB) mem;
+                                # doubling still leaves real margin. Per-GPU, not global.
+  valid_batch_size: 4
+  batches_per_epoch: 4        # measured ~690-720s/iter at full scale -- unchanged despite chunking/OBC fixes (compute-bound at this batch size)
+  valid_batches_per_epoch: 2
+
+  thread_workers: 8
+  valid_thread_workers: 8
+  prefetch_factor: 1
+
+  start_epoch: 0
+  num_epoch: 2                   # bounded by batches_per_epoch above -- real per-iter cost unchanged at full scale
+  epochs: 20
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  amp: False
+  grad_accum_every: 1
+  grad_max_norm: 'dynamic'
+
+  use_scheduler: True
+  scheduler:
+    scheduler_type: cosine-annealing
+    T_max: 20
+    eta_min: 1.0e-6
+
+
+# ---- USER: model geometry. ---- #
+model:
+  type: "wxformer"
+  frames: 1
+  image_height: 457
+  image_width: 759
+  levels: 25
+  channels: 4
+  surface_channels: 1
+  input_only_channels: 6      # dynamic_forcing (4: taux, tauy, net_heat_surface, runoff) + static (2)
+  output_only_channels: 0
+
+  patch_width: 1
+  patch_height: 1
+  frame_patch_size: 1
+  dim: [ 32, 64, 128, 256 ]
+  depth: [ 2, 2, 8, 2 ]
+  global_window_size: [ 8, 4, 2, 1 ]
+  local_window_size: 4
+  cross_embed_kernel_sizes:
+    - [ 4, 8, 16, 32 ]
+    - [ 2, 4 ]
+    - [ 2, 4 ]
+    - [ 2, 4 ]
+  cross_embed_strides: [ 2, 2, 2, 2 ]
+  attn_dropout: 0.
+  ff_dropout: 0.
+  interp: False
+  use_spectral_norm: True
+  upsample_with_ps: True
+  padding_conf:
+    activate: True
+    mode: mirror
+    pad_lat: [ 28, 27 ]
+    pad_lon: [ 5, 4 ]
+
+
+# ---- Loss ---- #
+loss:
+  training_loss: "mse"
+  validation_loss: "mse"
+  use_power_loss: False
+  use_spectral_loss: False
+  use_latitude_weights: False
+  use_variable_weights: False
+
+
+# ---- USER: rollout / inference ---- #
+inference:
+  run_mode: single
+  mode: none
+  save_forecast: '/glade/derecho/scratch/$USER/CREDIT_runs/rmom6_regional_levelwise_multistep_tendency_full/rollout'
+
+  single_forecast:
+    forecast_length: "14d"
+    start_datetime: "2018-01-01 12:00:00"
+
+  output:
+    format: netcdf
+    output_interval: null
+    group_by: full
+    variables: null
+    metadata: null
+    encoding:
+      dtype: float32
+      zlib: true
+      complevel: 4
+
+
+# Derecho, NOT Casper -- multi-node is only supported via credit submit --cluster derecho
+# (Casper's submission path is hardcoded to select=1, single-node, regardless of --gpus).
+# 2 nodes x 4 GPUs = 8 total: deliberately modest for a FIRST multi-node test (~30 free nodes
+# were reported available; validate correctness here before requesting more).
+pbs:
+  conda: "miles-credit-derecho"
+  project: "p93300012"
+  job_name: "rmom6_levelwise_multistep_tendency_full_timing"
+  walltime: "04:00:00"        # generous -- real full-epoch time on 18 years of data is unmeasured
+  nodes: 2
+  ncpus: 64
+  ngpus: 4
+  mem: '480GB'
+  queue: 'main'

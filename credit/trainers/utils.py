@@ -531,6 +531,41 @@ def load_dataloader(
     )
 
 
+def log_dataloader_worker_rss(name: str, loader: DataLoader) -> None:
+    """Log each live persistent DataLoader worker's resident memory (RSS), plus the total.
+
+    Reads ``/proc/<pid>/status`` directly (stdlib-only, Linux-specific -- matches how the
+    training cluster's cgroup OOM killer itself reports memory) rather than adding a psutil
+    dependency. A no-op if the loader hasn't started iterating yet (no ``_iterator``, e.g.
+    before the first epoch) or has no worker processes (``num_workers=0``).
+
+    Added to get real per-epoch visibility into worker memory after singlestep rMOM6 configs
+    were repeatedly OOM-killed with the killed process reported as a DataLoader worker
+    (``task=pt_data_worker``) -- prior to this, diagnosing that required reconstructing worker
+    RSS after the fact from a one-off standalone script, not from the training run's own logs.
+    """
+    it = getattr(loader, "_iterator", None)
+    workers = getattr(it, "_workers", None) if it is not None else None
+    if not workers:
+        return
+    total_mb = 0.0
+    per_worker = []
+    for w in workers:
+        if w.pid is None:
+            continue
+        try:
+            with open(f"/proc/{w.pid}/status") as f:
+                rss_mb = next(
+                    (int(line.split()[1]) / 1024.0 for line in f if line.startswith("VmRSS:")), None
+                )
+        except (FileNotFoundError, ProcessLookupError):
+            rss_mb = None
+        if rss_mb is not None:
+            total_mb += rss_mb
+            per_worker.append(f"{w.pid}={rss_mb:.0f}MB")
+    logging.info(f"{name} DataLoader workers: total={total_mb:.0f}MB [{', '.join(per_worker)}]")
+
+
 def effective_mode(conf):
     """Distributed mode for checkpoint/AMP code paths.
 

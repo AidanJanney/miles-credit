@@ -48,9 +48,18 @@ class LatWeightedMetrics:
     def _get_w_lat(self, target):
         return _w_lat_for_target(self, target)
 
-    def __call__(self, pred, y, clim=None, transform=None, forecast_datetime=0):
+    def __call__(self, pred, y, clim=None, transform=None, forecast_datetime=0, mask=None):
         # forecast_datetime is passed for interface consistency but not used here
 
+        # ``mask``: optional (1, C, H, W) float tensor, 1 where the dataset defines a target.
+        # When given, every metric is computed over those cells only. Without it the reductions
+        # run over the full grid, which for a regional ocean domain means roughly half the cells
+        # are land that ``fill_values`` set to a constant 0 in both pred and y -- predicted
+        # perfectly by construction, and therefore free skill in the average. Measured on the
+        # rMOM6 carib12 grid (50.75% land): mae reads ~2.03x better than the ocean-only value
+        # and rmse ~1.44x, while acc is barely affected (land sits at the field mean, so it adds
+        # little to a centred correlation). Off unless the caller passes a mask, so existing
+        # runs and other CREDIT configs keep their historical numbers.
         if transform is not None:
             pred = transform(pred)
             y = transform(y)
@@ -86,23 +95,52 @@ class LatWeightedMetrics:
             # Same math as the loop version, just computed for all channels together.
             dims_no_c = tuple(d for d in range(pred.dim()) if d != 1)
 
-            pred_prime = pred - pred.mean(dim=dims_no_c, keepdim=True)
-            y_prime = y - y.mean(dim=dims_no_c, keepdim=True)
+            if mask is None:
+                pred_prime = pred - pred.mean(dim=dims_no_c, keepdim=True)
+                y_prime = y - y.mean(dim=dims_no_c, keepdim=True)
 
-            denom = (
-                torch.sqrt(torch.sum(w * pred_prime**2, dim=dims_no_c) * torch.sum(w * y_prime**2, dim=dims_no_c))
-                + epsilon
-            )
-            acc = torch.sum(w * pred_prime * y_prime, dim=dims_no_c) / denom
+                denom = (
+                    torch.sqrt(torch.sum(w * pred_prime**2, dim=dims_no_c) * torch.sum(w * y_prime**2, dim=dims_no_c))
+                    + epsilon
+                )
+                acc = torch.sum(w * pred_prime * y_prime, dim=dims_no_c) / denom
 
-            # rmse: mean over (H, W) first (matching the loop version's dim=(-2, -1)
-            # inner mean), then mean over whatever dims remain except channel.
-            rmse_inner = torch.sqrt(torch.mean(error**2 * w, dim=(-2, -1)))
-            dims_no_c_reduced = tuple(d for d in range(rmse_inner.dim()) if d != 1)
-            rmse = rmse_inner.mean(dim=dims_no_c_reduced)
+                # rmse: mean over (H, W) first (matching the loop version's dim=(-2, -1)
+                # inner mean), then mean over whatever dims remain except channel.
+                rmse_inner = torch.sqrt(torch.mean(error**2 * w, dim=(-2, -1)))
+                dims_no_c_reduced = tuple(d for d in range(rmse_inner.dim()) if d != 1)
+                rmse = rmse_inner.mean(dim=dims_no_c_reduced)
 
-            mse = torch.mean(error**2 * w, dim=dims_no_c)
-            mae = torch.mean(torch.abs(error) * w, dim=dims_no_c)
+                mse = torch.mean(error**2 * w, dim=dims_no_c)
+                mae = torch.mean(torch.abs(error) * w, dim=dims_no_c)
+            else:
+                # Same statistics, restricted to valid cells. Means become sums over the mask
+                # divided by the valid-cell count, so an invalid cell contributes nothing
+                # rather than contributing a zero -- the distinction that makes mae/rmse read
+                # ~2x better than they are on this domain.
+                m = mask.to(dtype=pred.dtype, device=pred.device)
+                wm = w * m
+                # Valid cells per channel, and the same count shaped for keepdim division.
+                n = m.expand_as(pred).sum(dim=dims_no_c).clamp(min=1.0)
+                n_keep = n.view([1, -1] + [1] * (pred.dim() - 2))
+
+                pred_prime = (pred - (pred * m).sum(dim=dims_no_c, keepdim=True) / n_keep) * m
+                y_prime = (y - (y * m).sum(dim=dims_no_c, keepdim=True) / n_keep) * m
+                denom = (
+                    torch.sqrt(torch.sum(wm * pred_prime**2, dim=dims_no_c) * torch.sum(wm * y_prime**2, dim=dims_no_c))
+                    + epsilon
+                )
+                acc = torch.sum(wm * pred_prime * y_prime, dim=dims_no_c) / denom
+
+                # rmse keeps the unmasked version's shape of reduction: a per-(sample, channel)
+                # spatial mean, square-rooted, then averaged over the remaining dims.
+                n_hw = m.expand_as(pred).sum(dim=(-2, -1)).clamp(min=1.0)
+                rmse_inner = torch.sqrt((error**2 * wm).sum(dim=(-2, -1)) / n_hw)
+                dims_no_c_reduced = tuple(d for d in range(rmse_inner.dim()) if d != 1)
+                rmse = rmse_inner.mean(dim=dims_no_c_reduced)
+
+                mse = (error**2 * wm).sum(dim=dims_no_c) / n
+                mae = (torch.abs(error) * wm).sum(dim=dims_no_c) / n
 
             stacked = [acc, rmse, mse, mae]
             if self.ensemble_size > 1:

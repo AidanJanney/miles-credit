@@ -281,14 +281,20 @@ def assemble_rollout_batch(full_data_dict: dict, curr_batch: dict) -> dict:
                 # static and any other non-predicted field: carry forward from ic_preprocessed
                 assembled_input[source][var_key] = ic_tensor
 
-    return {
+    assembled = {
         "input": assembled_input,
         "target": curr_batch.get("target"),
-        # Forward the current step's real metadata (datetimes) through -- without this,
-        # ConcatToTensor never sees a top-level "metadata" key at t>1 and
-        # batch_dict["metadata"]["target"][source]["datetime"] silently stays absent for the
-        # rest of the rollout (it's only ever populated from the t=0/IC batch). Needed by any
-        # postblock that must know the current step's real calendar time (e.g. an OBC nudge
-        # block matching lead time against an external boundary-condition file).
-        "metadata": curr_batch.get("metadata"),
     }
+    # Forward the current step's real metadata (datetimes) through -- without this,
+    # ConcatToTensor never sees a top-level "metadata" key at t>1 and
+    # batch_dict["metadata"]["target"][source]["datetime"] silently stays absent for the
+    # rest of the rollout (it's only ever populated from the t=0/IC batch). Needed by any
+    # postblock that must know the current step's real calendar time (e.g. an OBC nudge
+    # block matching lead time against an external boundary-condition file).
+    #
+    # Only set the key when the batch actually carries metadata: ConcatToTensor iterates
+    # batch["metadata"].items() unconditionally, so injecting an explicit None turns a
+    # metadata-less batch into an AttributeError instead of the absent-key case it handles.
+    if curr_batch.get("metadata") is not None:
+        assembled["metadata"] = curr_batch["metadata"]
+    return assembled

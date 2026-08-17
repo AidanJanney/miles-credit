@@ -167,14 +167,30 @@ class BridgeScalerTransform(BasePreblock):
             self.variables = _parse_variable_selection(self.variables, batch, self.data_types)
             self.variables_expanded = True
         batch = self._copy_batch(batch)  # shallow copy — avoids mutating the caller's dict
-        if self.data_types is not None:
-            # Slice to the requested data types — useful in multi-step training where
-            # the input is already scaled but the target still needs to be scaled.
-            sub_batch = {dt: batch[dt] for dt in self.data_types if dt in batch}
-            scaled = scale_var_dict(sub_batch, self.scaler, self.method, self.variables)
-            batch.update(scaled)  # write the scaled data types back into the full batch
-            return batch
-        return scale_var_dict(batch, self.scaler, self.method, self.variables)
+        data_types = self.data_types if self.data_types is not None else [dt for dt in batch if dt in batch]
+        # Slice to the requested data types — useful in multi-step training where
+        # the input is already scaled but the target still needs to be scaled.
+        sub_batch = {dt: self._drop_empty_sources(batch[dt]) for dt in data_types if dt in batch}
+        scaled = scale_var_dict(sub_batch, self.scaler, self.method, self.variables)
+        for dt, sources in scaled.items():
+            batch[dt] = {**batch[dt], **sources}  # write the scaled data types back
+        return batch
+
+    @staticmethod
+    def _drop_empty_sources(sources):
+        """Hide sources that contribute no variable to this data type from bridgescaler.
+
+        A source can legitimately be empty under one data type: an OBC ring declared as
+        ``dynamic_forcing`` has variables under ``input`` and nothing under ``target``, and the
+        dataset still emits the source key there (an empty dict). ``scale_var_dict`` asserts on
+        every source key it walks into *before* consulting the variable list -- "found in
+        'var_dict' but missing in 'scalers'" -- so an empty group aborts the run rather than
+        being the no-op it should be. Nothing is lost by omitting it: there are no tensors to
+        scale, and the caller merges the untouched original group back afterwards.
+        """
+        if not isinstance(sources, dict):
+            return sources
+        return {src: vars_ for src, vars_ in sources.items() if not (isinstance(vars_, dict) and not vars_)}
 
     def fit_scaler_batch(self, batch: dict) -> dict:
         """

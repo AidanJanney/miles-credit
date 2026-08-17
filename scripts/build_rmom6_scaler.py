@@ -24,14 +24,23 @@ Inputs used (see explore_statistics_carib12/stats/):
     stats_global.nc     -> SSH_mean/SSH_std (single scalar; SSH has no level dim)
     stats_xi.nc         -> <var>_xi per z1_l layer (uo/vo/thetao/so) / scalar (SSH)
 
-Only the 5 prognostic variables (uo, vo, thetao, so, SSH) get scaler entries —
-stats for dynamic_forcing (taux, tauy, net_heat_surface, runoff) don't exist yet. That's
-why ``config/rmom6_regional.yml``'s ``preblocks.normalize.args.variables`` must be
-the explicit 5-variable list this script prints, not ``[]`` (empty = "every
-variable present"): with dynamic_forcing/static variables in the batch but no
-matching scaler entry, an empty ``variables: []`` makes bridgescaler's
-``scale_var_dict`` raise ``AssertionError`` on the first unscaled key it walks
-into ("...found in 'var_dict' but missing in 'scalers'").
+The 5 prognostic variables (uo, vo, thetao, so, SSH) get input- *and* target-side scaler
+entries. The 6 input-only channels — dynamic_forcing (taux, tauy, net_heat_surface, runoff)
+and static (deptho, wet) — get **input-side entries only**, read from
+``stats_global_surface.nc`` (built by ``scripts/build_rmom6_surface_stats.py``); they are
+never predicted, so a target-side entry would be meaningless and the postblock, which reads
+``["target"]``, correctly never sees them.
+
+Leaving those 6 unscaled is not benign: measured on the input tensor, ``deptho`` carries
+std ~2276 (max 6000) against the prognostics' ~1, and ``net_heat_surface`` ~108, while
+``runoff`` (~2e-4) is effectively invisible. Since WxFormer uses ``patch_height/width: 1``,
+its cross-embed conv sees those magnitudes directly and the input is dominated by static
+bathymetry — which shows up in rollouts as a bathymetry-shaped imprint on the surface fields.
+
+``preblocks.normalize.args.variables`` should be the explicit 11-variable list this script
+prints, not ``[]`` (empty = "every variable present"): if any variable in the batch lacks a
+matching scaler entry, bridgescaler's ``scale_var_dict`` raises ``AssertionError`` on the
+first unscaled key it walks into ("...found in 'var_dict' but missing in 'scalers'").
 
 Output is a single JSON, structured ``{"input": {source: {var_key: scaler}}, "target":
 {source: {var_key: scaler}}}``. Point *both* ``preblocks.per_step.normalize.args.scaler_path``
@@ -85,6 +94,13 @@ DEFAULT_STATS_DIR = "/glade/work/ajanney/RegionalEmulation_v2/explore_statistics
 SOURCE_NAME = "rMOM6"
 LEVEL_VARS = ["thetao", "so", "uo", "vo"]  # covered by stats_levelwise.nc
 GLOBAL_VARS = ["SSH"]  # covered by stats_global.nc (scalar, no level dim)
+# Input-only 2D channels, covered by stats_global_surface.nc (build_rmom6_surface_stats.py).
+# Level-independent, so the same file serves both the native-level and --level-pairs paths.
+# xi is a tendency scaling for predicted fields only, so it is never applied to these.
+SURFACE_VARS: dict[str, list[str]] = {
+    "dynamic_forcing": ["taux", "tauy", "net_heat_surface", "runoff"],
+    "static": ["deptho", "wet"],
+}
 
 
 def parse_levels(spec: str | None) -> list[float] | None:
@@ -165,13 +181,36 @@ def build_scaler_dict(
         pre_target[key] = sc
         var_keys.append(key)
 
+    # Input-only channels: added to pre_input ONLY. The postblock reads ["target"], and these
+    # are never predicted, so a target-side entry would be meaningless. Without them the
+    # channels reach the model unscaled -- deptho at ~2300x the prognostics' scale, which
+    # imprints bathymetry on the predicted surface fields.
+    surface_path = os.path.join(stats_dir, "stats_global_surface.nc")
+    surface_keys: list[str] = []
+    if os.path.exists(surface_path):
+        surface = xr.open_dataset(surface_path)
+        for field_type, varnames in SURFACE_VARS.items():
+            for varname in varnames:
+                if f"{varname}_mean" not in surface:
+                    print(f"WARNING: {varname} missing from {surface_path}; skipping")
+                    continue
+                key = f"{SOURCE_NAME}/{field_type}/2d/{varname}"
+                pre_input[key] = _make_scaler(
+                    float(surface[f"{varname}_mean"].values), float(surface[f"{varname}_std"].values)
+                )
+                surface_keys.append(key)
+        surface.close()
+    else:
+        print(f"WARNING: {surface_path} missing -- run scripts/build_rmom6_surface_stats.py;")
+        print("         dynamic_forcing/static channels will reach the model UNSCALED.")
+
     levelwise.close()
     globalwise.close()
     if xi_ds is not None:
         xi_ds.close()
 
     pre_dict = {"input": {SOURCE_NAME: pre_input}, "target": {SOURCE_NAME: pre_target}}
-    return pre_dict, var_keys
+    return pre_dict, var_keys + surface_keys
 
 
 def main() -> None:
@@ -224,14 +263,26 @@ def main() -> None:
         f"levels    : {'pairwise thickness-average (50 -> 25)' if args.level_pairs else ('all 50' if levels is None else levels)}"
     )
     print(f"wrote     : {out}")
+    predicted = [k for k in var_keys if "/prognostic/" in k]
+    input_only = [k for k in var_keys if "/prognostic/" not in k]
+
     print()
-    print("Variables covered (use this exact list for both preblocks.normalize.args.variables")
-    print("and postblocks.denorm.args.variables in config/rmom6_regional.yml):")
+    print("preblocks.normalize.args.variables — ALL covered variables (everything fed to the model):")
     for key in var_keys:
         print(f"  - {key}")
     print()
-    print("NOT covered (no stats yet): dynamic_forcing (taux, tauy, net_heat_surface, runoff), static (deptho, wet).")
-    print("Leave those out of bridgescaler_transform's variables list — they pass through unscaled.")
+    print("postblocks.denorm.args.variables — PROGNOSTICS ONLY (the input-only channels below are")
+    print("never predicted, so there is nothing to invert for them):")
+    for key in predicted:
+        print(f"  - {key}")
+    print()
+    if input_only:
+        print(
+            f"Input-only channels now normalized ({len(input_only)}): "
+            + ", ".join(k.split("/")[-1] for k in input_only)
+        )
+        print("Leaving these out of the preblock list makes them enter the model RAW — deptho at ~2300x")
+        print("the prognostics' scale — which imprints bathymetry on the predicted surface fields.")
 
 
 if __name__ == "__main__":

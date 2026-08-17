@@ -30,6 +30,30 @@ from credit.trainers.utils import accum_log, cycle
 logger = logging.getLogger(__name__)
 
 
+def _physical_space_mae(y_processed: dict, y_raw: dict) -> dict[str, float]:
+    """Per-variable MAE between the postblock-denormalized prediction (``y_processed``) and
+    the never-normalized target (``y_raw``), in physical units.
+
+    Training loss/metrics are computed in normalized space, which is not comparable across
+    configs using different normalization scales (e.g. CREDIT-style xi tendency scaling vs
+    plain std -- see EXPERIMENT_DESIGN.md §6). This is a supplementary diagnostic only, logged
+    alongside those metrics; it does not affect training.
+    """
+    out = {}
+    for source, pred_vars in y_processed.items():
+        raw_vars = y_raw.get(source, {})
+        for var_key, pred in pred_vars.items():
+            target = raw_vars.get(var_key)
+            if target is None or target.shape != pred.shape:
+                continue
+            diff = (pred - target.to(device=pred.device, dtype=pred.dtype)).abs()
+            finite = torch.isfinite(diff)
+            if not finite.any():
+                continue
+            out[var_key] = diff[finite].mean().item()
+    return out
+
+
 class TrainerERA5Gen2(BaseTrainer):
     def __init__(self, model: torch.nn.Module, rank: int, conf: dict):
         """
@@ -100,6 +124,9 @@ class TrainerERA5Gen2(BaseTrainer):
         trainer_conf = conf.get("trainer", {})
         bpt = trainer_conf.get("backprop_on_timestep") or data_conf.get("backprop_on_timestep")
         self.backprop_on_timestep = bpt if bpt is not None else list(range(1, self.forecast_len + 1))
+        # How many rollout steps contribute a loss term, i.e. how many times backward() runs
+        # per training iteration. Used to average the accumulated gradient over those steps.
+        self.n_backprop_steps = max(len(self.backprop_on_timestep), 1)
 
         data_clamp = data_conf.get("data_clamp")
         if data_clamp is None:
@@ -128,6 +155,47 @@ class TrainerERA5Gen2(BaseTrainer):
         self.is_ring_crps = loss_name == "ring-crps"
         self.is_crps_ensemble = is_crps_loss(loss_name) and self.ensemble_size > 1
         self.use_batch_axis_ensemble = self.ensemble_size > 1 and not self.is_ring_crps
+
+        # ---- Loss masking over cells the dataset never defines (land / below bathymetry) ----
+        self.mask_missing_targets = conf.get("loss", {}).get("mask_missing_targets", False)
+        # Prescribed-boundary cells to drop from the loss, as {"lat": [start, end], "lon": ...}
+        # counts -- same [start, end] convention as model.padding_conf's pad_lat/pad_lon. These
+        # are cells whose value is imposed rather than predicted (an OBC halo appended to the
+        # grid), so scoring the model on them penalizes it for reproducing a boundary condition
+        # it is handed. Applies only when mask_missing_targets is on, since it shares that mask.
+        self.exclude_border = conf.get("loss", {}).get("exclude_border") or {}
+        if self.exclude_border and not self.mask_missing_targets:
+            raise ValueError(
+                "loss.exclude_border requires loss.mask_missing_targets: True — the border "
+                "exclusion is applied to that mask, and without it the loss is an unmasked mean."
+            )
+        # Score the metrics over the same cells as the loss. Off by default: turning it on
+        # changes every logged acc/rmse/mse/mae, so runs before and after are not comparable,
+        # and every other CREDIT config keeps its historical numbers. Worth turning on for a
+        # domain with a large undefined fraction -- on the rMOM6 grid land is 50.75% of cells
+        # and is predicted perfectly by construction, which makes the unmasked mae read ~2.03x
+        # better than the ocean-only error (rmse ~1.44x; acc is barely affected).
+        self.mask_metrics = conf.get("loss", {}).get("mask_metrics", False)
+        if self.mask_metrics and not self.mask_missing_targets:
+            raise ValueError(
+                "loss.mask_metrics requires loss.mask_missing_targets: True — the metrics reuse "
+                "the loss mask, and there is no mask to reuse without it."
+            )
+        self._loss_mask = None
+        self._loss_mask_key = None
+        # The model's grid, which a preblock may have enlarged past the dataset's (the
+        # ocean_obc_halo preblock appends a prescribed boundary ring to both x and y). The loss
+        # mask is derived from the *raw* target, so it comes out at the dataset's grid and has
+        # to be padded up to this one before it can multiply an elementwise loss.
+        self._model_grid = (conf.get("model", {}).get("image_height"), conf.get("model", {}).get("image_width"))
+        if self.mask_missing_targets and not any(
+            "mask" in type(block).__name__.lower() for block in self.step_postblocks.values()
+        ):
+            logger.warning(
+                "loss.mask_missing_targets is on but no masking postblock is configured in "
+                "postblocks.per_step. Masked cells receive no gradient, so the model's output "
+                "there is unconstrained and will be fed back into the next rollout step as-is."
+            )
 
     # ------------------------------------------------------------------
     # Domain-parallel forward helpers (shared by train and validate)
@@ -171,6 +239,197 @@ class TrainerERA5Gen2(BaseTrainer):
             if _y.dim() == 5:
                 _y = _y.flatten(1, 2)
             full_data_dict["y"] = shard_spatial(_y, self.domain_manager)
+
+    # ------------------------------------------------------------------
+    # Loss masking (shared by train and validate)
+    # ------------------------------------------------------------------
+
+    def _pad_mask_to_model_grid(self, mask):
+        """Zero-pad a raw-target-derived mask up to the model grid, using ``exclude_border``.
+
+        A preblock can hand the model a larger grid than the dataset provides: ``ocean_obc_halo``
+        appends a one-cell ring of prescribed open-boundary values to both ``x`` and ``y``. The
+        mask is built from ``y_raw`` — deliberately, so the dataset's own missing-data convention
+        stays the single source of truth — and therefore comes out at the dataset's grid, one
+        cell short of ``y`` in each padded direction.
+
+        ``loss.exclude_border`` already names those cells, in the same ``[start, end]``
+        convention the preblock's ``pad_lat``/``pad_lon`` use, and their mask value is zero
+        either way, so it doubles as the padding spec here. Getting this wrong is not a
+        cosmetic mismatch: without the pad the shape check below rejects the mask outright,
+        and padding at the wrong end would silently score the model on a prescribed ring while
+        dropping a real interior row.
+        """
+        H_model, W_model = self._model_grid
+        if H_model is None or W_model is None:
+            return mask
+        dH, dW = H_model - mask.shape[-2], W_model - mask.shape[-1]
+        if dH == 0 and dW == 0:
+            return mask
+        if dH < 0 or dW < 0:
+            raise ValueError(
+                f"Loss mask grid {tuple(mask.shape[-2:])} is larger than model.image_height/width "
+                f"({H_model}, {W_model}); the raw target cannot exceed the model grid."
+            )
+        lat0, lat1 = self.exclude_border.get("lat", (0, 0))
+        lon0, lon1 = self.exclude_border.get("lon", (0, 0))
+        if (lat0 + lat1, lon0 + lon1) != (dH, dW):
+            raise ValueError(
+                f"The model grid ({H_model}, {W_model}) is larger than the raw target grid "
+                f"{tuple(mask.shape[-2:])} by ({dH}, {dW}), but loss.exclude_border "
+                f"{self.exclude_border or '{}'} accounts for ({lat0 + lat1}, {lon0 + lon1}). "
+                "Set loss.exclude_border to the preblock's pad_lat/pad_lon so the loss mask "
+                "knows which cells were appended."
+            )
+        # F.pad takes the last dim first; value 0 marks the appended cells invalid.
+        return torch.nn.functional.pad(mask, (lon0, lon1, lat0, lat1), value=0.0)
+
+    def _metrics_mask_kwarg(self, full_data_dict):
+        """``{"mask": ...}`` when metrics are masked, otherwise ``{}``.
+
+        Returned as kwargs rather than a plain value so the metrics call signature is untouched
+        when the flag is off: not every metrics object in the codebase (or in a test) accepts a
+        ``mask`` argument, and a caller that never asked for masking should not have to. The
+        mask itself is cached by ``_get_loss_mask``, so this costs a dict lookup per step.
+        """
+        if not self.mask_metrics:
+            return {}
+        return {"mask": self._get_loss_mask(full_data_dict)}
+
+    def _get_loss_mask(self, full_data_dict):
+        """Cached ``(1, C, H, W)`` float mask of target cells the dataset actually defines.
+
+        Derived from the **raw** target (``y_raw``, i.e. ``batch["target"]`` before the
+        ``fill_values`` preblock replaces NaN with 0), so the dataset's own missing-data
+        convention is the single source of truth — the same principle the wet-mask fix rests
+        on. Channel positions come from ``metadata["target"]["_channel_map"]``, which
+        ``ConcatToTensor`` builds alongside ``y`` itself, so the mask cannot drift out of sync
+        with concat order the way a separately-configured geometry file could.
+
+        Built once and cached: for an ocean/land grid the missing cells are fixed geometry, so
+        rebuilding per batch would be pure overhead. The cache key includes the sharded shape
+        and device, so a change in either rebuilds.
+
+        A variable present in the channel map but absent from ``y_raw`` is left fully unmasked
+        (all ones) rather than dropped, so an unexpected schema gap cannot silently delete a
+        variable from the loss.
+        """
+        y = full_data_dict["y"]
+        key = (tuple(y.shape[1:]), y.device, y.dtype)
+        if self._loss_mask_key == key:
+            return self._loss_mask
+
+        channel_map = full_data_dict["metadata"]["target"]["_channel_map"]
+        raw_vars = {
+            var_key: tensor
+            for source_vars in full_data_dict["y_raw"].values()
+            for var_key, tensor in source_vars.items()
+        }
+
+        n_channels = max(entry["slice"].stop for entry in channel_map.values())
+        mask = None
+        missing = []
+        for var_key, entry in channel_map.items():
+            tensor = raw_vars.get(var_key)
+            if tensor is None:
+                missing.append(var_key)
+                continue
+            # (B, n_levels, T, H, W) -> (1, n_levels * T, H, W), matching the flatten(1, 2)
+            # that _sharded_forward applies to y. A cell counts as valid only where it is
+            # finite in every sample of the batch.
+            var_mask = torch.isfinite(tensor).all(dim=0, keepdim=True).flatten(1, 2)
+            if mask is None:
+                mask = torch.ones(
+                    (1, n_channels, var_mask.shape[-2], var_mask.shape[-1]),
+                    dtype=y.dtype,
+                    device=var_mask.device,
+                )
+            mask[:, entry["slice"]] = var_mask.to(mask.dtype)
+
+        if mask is None:
+            raise ValueError(
+                "loss.mask_missing_targets is on but no target variable in the channel map was "
+                f"found in y_raw (channel map keys: {sorted(channel_map)})."
+            )
+        if missing:
+            logger.warning("Loss mask: no raw target for %s; those channels are left unmasked.", sorted(missing))
+
+        mask = self._pad_mask_to_model_grid(mask)
+
+        # Drop prescribed-boundary rows/columns before sharding, while the mask is still on the
+        # full grid — after shard_spatial each rank holds only a slice of H and "the last row"
+        # is no longer well defined.
+        if self.exclude_border:
+            lat0, lat1 = self.exclude_border.get("lat", (0, 0))
+            lon0, lon1 = self.exclude_border.get("lon", (0, 0))
+            H, W = mask.shape[-2], mask.shape[-1]
+            if lat0 + lat1 >= H or lon0 + lon1 >= W:
+                raise ValueError(f"loss.exclude_border {self.exclude_border} removes the entire {H}x{W} grid.")
+            if lat0:
+                mask[..., :lat0, :] = 0
+            if lat1:
+                mask[..., H - lat1 :, :] = 0
+            if lon0:
+                mask[..., :, :lon0] = 0
+            if lon1:
+                mask[..., :, W - lon1 :] = 0
+            logger.info("Loss mask: excluded border lat=%s lon=%s from a %dx%d grid.", (lat0, lat1), (lon0, lon1), H, W)
+
+        # Domain parallel shards y along H in _sharded_forward; the mask must follow.
+        mask = shard_spatial(mask.to(y.device), self.domain_manager)
+        if mask.shape[1:] != y.shape[1:]:
+            raise ValueError(f"Loss mask shape {tuple(mask.shape)} is incompatible with y {tuple(y.shape)}.")
+
+        # One-time guard: the mask zeroes the loss at invalid cells, but 0 * NaN is NaN in both
+        # the forward and the backward pass, so masking cannot rescue a y that still holds NaN.
+        # Enabling this flag without a fill_values preblock would otherwise produce a silently
+        # NaN loss; fail loudly at the source instead.
+        if not torch.isfinite(y).all():
+            raise ValueError(
+                "loss.mask_missing_targets requires a finite target tensor, but y contains "
+                "non-finite values. Add a fill_values preblock (before concat) so missing cells "
+                "are filled in normalized space."
+            )
+
+        valid_fraction = mask.mean().item()
+        logger.info(
+            "Loss mask built from raw targets: %.1f%% of %d channels x %d x %d cells are valid.",
+            100.0 * valid_fraction,
+            mask.shape[1],
+            mask.shape[2],
+            mask.shape[3],
+        )
+        if valid_fraction == 0.0:
+            raise ValueError("Loss mask is empty — every target cell is non-finite.")
+
+        self._loss_mask = mask
+        self._loss_mask_key = key
+        return mask
+
+    def _reduce_loss(self, elementwise_loss, full_data_dict):
+        """Reduce an elementwise loss to a scalar, optionally ignoring undefined target cells.
+
+        Without ``loss.mask_missing_targets`` this is a plain mean, unchanged. With it, the
+        mean is taken over valid cells only: for the regional MOM6 grid roughly half of every
+        3D field is land or below-bathymetry geometry that ``fill_values`` sets to a constant
+        0 in both ``y`` and (after training) ``y_pred``, so an unmasked mean spends half its
+        budget fitting a constant. The mask broadcasts over the batch axis, which also covers
+        the ensemble case where ``y_pred`` has ``B * ensemble_size`` rows.
+
+        Note this reduces the loss only — ``metrics`` stays unmasked, so metric columns in
+        ``training_log.csv`` keep their previous meaning while ``train_loss``/``valid_loss``
+        change scale (roughly doubling for rMOM6, where about half the cells are masked).
+        """
+        if not self.mask_missing_targets:
+            return elementwise_loss.mean()
+        if elementwise_loss.dim() == 0:
+            raise ValueError(
+                "loss.mask_missing_targets requires an elementwise loss, but the criterion "
+                "returned a scalar. Losses that reduce internally (VariableTotalLoss2D via "
+                "use_latitude_weights / use_variable_weights, ring-crps) cannot be masked here."
+            )
+        mask = self._get_loss_mask(full_data_dict).to(elementwise_loss.dtype)
+        return (elementwise_loss * mask).sum() / mask.expand_as(elementwise_loss).sum().clamp_min(1.0)
 
     def _gather_for_next_step(self, full_data_dict):
         """Gather domain-sharded y_processed back to full height between rollout steps.
@@ -262,6 +521,10 @@ class TrainerERA5Gen2(BaseTrainer):
             logs = {}
             loss = 0
             full_data_dict = {}
+            # One metrics dict per rollout step, averaged after the loop. With
+            # forecast_len 1 that average is the single step, i.e. identical to the
+            # previous final-step-only behavior.
+            step_metrics = []
 
             # Suppress gradient sync on non-boundary micro-steps during
             # gradient accumulation — otherwise DDP all-reduces / FSDP2
@@ -317,18 +580,45 @@ class TrainerERA5Gen2(BaseTrainer):
                             full_data_dict["y"].float(), min=self.clamp_min, max=self.clamp_max
                         )
                     with torch.autocast(device_type="cuda", enabled=_amp):
-                        loss = criterion(
-                            full_data_dict["y"].float().to(full_data_dict["y_pred"].dtype),
-                            full_data_dict["y_pred"],
-                        ).mean()
-                    accum_log(logs, {"loss": loss.item()})
+                        loss = self._reduce_loss(
+                            criterion(
+                                full_data_dict["y"].float().to(full_data_dict["y_pred"].dtype),
+                                full_data_dict["y_pred"],
+                            ),
+                            full_data_dict,
+                        )
+                    # n_loss counts the steps that contributed, so the sum below can be
+                    # turned back into a per-step mean. Without it train_loss is a sum
+                    # over forecast_len while valid_loss is a mean, and the two are not
+                    # on the same scale for multistep runs.
+                    accum_log(logs, {"loss": loss.item(), "n_loss": 1.0})
                     if self.is_crps_ensemble:
                         # Ensemble spread proxy: std of member errors.
                         target = full_data_dict["y"]
                         if full_data_dict["y_pred"].shape[0] == target.shape[0] * self.ensemble_size:
                             target = torch.repeat_interleave(target, self.ensemble_size, 0)
                         accum_log(logs, {"std": (full_data_dict["y_pred"] - target).detach().std().item()})
-                    scaler.scale(loss / grad_accum_every).backward(retain_graph=self.retain_graph)
+                    # Divide by the number of contributing rollout steps as well as by
+                    # grad_accum_every. backward() runs once per step and accumulates into the
+                    # same .grad, so without this the optimizer sees the SUM over the rollout
+                    # while train_loss (logs["loss"] / logs["n_loss"], below) reports the MEAN --
+                    # a forecast_len-3 run then takes ~3x the step a forecast_len-1 run takes at
+                    # the same trainer.learning_rate, which makes the single-step vs multi-step
+                    # arms of an experiment grid incomparable at a shared LR. grad_max_norm does
+                    # not absorb it either: "dynamic" clips to the gradient's own norm, i.e. not
+                    # at all.
+                    scaler.scale(loss / (grad_accum_every * self.n_backprop_steps)).backward(
+                        retain_graph=self.retain_graph
+                    )
+
+                if full_data_dict.get("y_pred") is not None and full_data_dict.get("y") is not None:
+                    step_metrics.append(
+                        metrics(
+                            full_data_dict["y_pred"],
+                            full_data_dict["y"],
+                            **self._metrics_mask_kwarg(full_data_dict),
+                        )
+                    )
                 # No barrier here: NCCL collectives (grad sync, halo exchange)
                 # already order ranks; a per-timestep barrier only adds latency.
 
@@ -378,15 +668,22 @@ class TrainerERA5Gen2(BaseTrainer):
                 if self.ema is not None:
                     self.ema.update(self.model)
 
-            if full_data_dict.get("y_pred") is not None and full_data_dict.get("y") is not None:
-                metrics_dict = metrics(full_data_dict["y_pred"], full_data_dict["y"])
-                for name, value in metrics_dict.items():
-                    value = torch.Tensor([value]).to(self.device, non_blocking=True)
+            if step_metrics:
+                for name in step_metrics[0]:
+                    mean_over_steps = sum(m[name] for m in step_metrics) / len(step_metrics)
+                    value = torch.Tensor([mean_over_steps]).to(self.device, non_blocking=True)
                     if self.distributed:
                         all_reduce_avg(value)
                     results_dict[f"train_{name}"].append(value[0].item())
 
-            batch_loss = torch.Tensor([logs.get("loss", 0.0)]).to(self.device)
+            if full_data_dict.get("y_processed") is not None and full_data_dict.get("y_raw") is not None:
+                for var_key, val in _physical_space_mae(full_data_dict["y_processed"], full_data_dict["y_raw"]).items():
+                    value = torch.Tensor([val]).to(self.device, non_blocking=True)
+                    if self.distributed:
+                        all_reduce_avg(value)
+                    results_dict[f"train_mae_phys_{var_key.rsplit('/', 1)[-1]}"].append(value[0].item())
+
+            batch_loss = torch.Tensor([logs.get("loss", 0.0) / max(logs.get("n_loss", 1.0), 1.0)]).to(self.device)
             if self.distributed:
                 all_reduce_avg(batch_loss)
             results_dict["train_loss"].append(batch_loss[0].item())
@@ -425,7 +722,7 @@ class TrainerERA5Gen2(BaseTrainer):
         Validate for one epoch.
 
         Runs self.valid_forecast_len autoregressive steps per sample.
-        Loss and metrics are computed only at the final step.
+        Loss and metrics are computed at every step and averaged over the rollout.
 
         Args:
             epoch: Current epoch number.
@@ -467,6 +764,7 @@ class TrainerERA5Gen2(BaseTrainer):
                 loss = 0
 
                 full_data_dict = {}
+                step_losses, step_metrics, step_phys = [], [], []
 
                 for t in range(1, self.valid_forecast_len + 1):
                     batch = next(dl)
@@ -503,25 +801,54 @@ class TrainerERA5Gen2(BaseTrainer):
                     if t < self.valid_forecast_len:
                         self._gather_for_next_step(full_data_dict)
 
-                    if t == self.valid_forecast_len:
-                        if self.flag_clamp:
-                            full_data_dict["y"] = torch.clamp(
-                                full_data_dict["y"].float(), min=self.clamp_min, max=self.clamp_max
-                            )
-                        loss = criterion(
-                            full_data_dict["y"].float().to(full_data_dict["y_pred"].dtype),
-                            full_data_dict["y_pred"],
-                        ).mean()
-                        metrics_dict = metrics(full_data_dict["y_pred"].float(), full_data_dict["y"].float())
-                        for name, value in metrics_dict.items():
-                            value = torch.Tensor([value]).to(self.device, non_blocking=True)
-                            if self.distributed:
-                                all_reduce_avg(value)
-                            results_dict[f"valid_{name}"].append(value[0].item())
+                    # Evaluated at every step and averaged after the loop, matching the
+                    # train loop. Previously this was gated on t == valid_forecast_len,
+                    # so valid_acc reported day-N skill alone while train_loss summed
+                    # over all N steps -- the two were never comparable for multistep.
+                    if self.flag_clamp:
+                        full_data_dict["y"] = torch.clamp(
+                            full_data_dict["y"].float(), min=self.clamp_min, max=self.clamp_max
+                        )
+                    step_losses.append(
+                        self._reduce_loss(
+                            criterion(
+                                full_data_dict["y"].float().to(full_data_dict["y_pred"].dtype),
+                                full_data_dict["y_pred"],
+                            ),
+                            full_data_dict,
+                        ).item()
+                    )
+                    step_metrics.append(
+                        metrics(
+                            full_data_dict["y_pred"].float(),
+                            full_data_dict["y"].float(),
+                            **self._metrics_mask_kwarg(full_data_dict),
+                        )
+                    )
+                    if full_data_dict.get("y_processed") is not None and full_data_dict.get("y_raw") is not None:
+                        step_phys.append(_physical_space_mae(full_data_dict["y_processed"], full_data_dict["y_raw"]))
 
                 full_data_dict = apply_postblocks(self.rollout_postblocks, full_data_dict)
 
-                batch_loss = torch.Tensor([loss.item() if torch.is_tensor(loss) else loss]).to(self.device)
+                for name in step_metrics[0]:
+                    value = torch.Tensor([sum(m[name] for m in step_metrics) / len(step_metrics)]).to(
+                        self.device, non_blocking=True
+                    )
+                    if self.distributed:
+                        all_reduce_avg(value)
+                    results_dict[f"valid_{name}"].append(value[0].item())
+
+                if step_phys:
+                    for var_key in step_phys[0]:
+                        value = torch.Tensor([sum(p[var_key] for p in step_phys) / len(step_phys)]).to(
+                            self.device, non_blocking=True
+                        )
+                        if self.distributed:
+                            all_reduce_avg(value)
+                        results_dict[f"valid_mae_phys_{var_key.rsplit('/', 1)[-1]}"].append(value[0].item())
+
+                loss = sum(step_losses) / len(step_losses)
+                batch_loss = torch.Tensor([loss]).to(self.device)
                 # Average validation loss across ranks (the train loop already
                 # does this). Without it each rank tracks a different local
                 # valid_loss, and fit() makes early-stopping / best-checkpoint

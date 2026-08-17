@@ -120,6 +120,13 @@ preblocks:
           - "rMOM6/prognostic/3d/uo"
           - "rMOM6/prognostic/3d/vo"
           - "rMOM6/prognostic/2d/SSH"
+          # input-only channels: unnormalized these enter RAW (deptho ~2300x the prognostics) and imprint bathymetry on the surface fields
+          - "rMOM6/dynamic_forcing/2d/taux"
+          - "rMOM6/dynamic_forcing/2d/tauy"
+          - "rMOM6/dynamic_forcing/2d/net_heat_surface"
+          - "rMOM6/dynamic_forcing/2d/runoff"
+          - "rMOM6/static/2d/deptho"
+          - "rMOM6/static/2d/wet"
         method: transform
         scaler_type: standard
     fill_land:
@@ -206,8 +213,8 @@ trainer:
   valid_batch_size: 1
   batches_per_epoch: 10       # steady-state ~30-50s/iter after a slow first iter, but a full 52-iter epoch x10 still too long
   valid_batches_per_epoch: 5
-  thread_workers: 8
-  valid_thread_workers: 8
+  thread_workers: 4
+  valid_thread_workers: 4
   prefetch_factor: 1
 
   start_epoch: 0

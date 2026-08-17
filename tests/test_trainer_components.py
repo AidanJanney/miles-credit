@@ -1565,3 +1565,152 @@ class TestTrainerERA5Gen2AdditionalCoverage:
         assert len(results["valid_loss"]) == 1
         assert torch.isfinite(torch.tensor(results["valid_loss"][0]))
         assert results["valid_forecast_len"][-1] == 2
+
+
+# ---------------------------------------------------------------------------
+# Loss masking over undefined target cells (loss.mask_missing_targets)
+# ---------------------------------------------------------------------------
+
+
+class _NaNTargetLoader(_FakeLoader):
+    """_FakeLoader whose targets are NaN over a fixed block of the grid.
+
+    Stands in for land / below-bathymetry cells in the regional ocean datasets, where the raw
+    target is NaN and a fill_values preblock replaces it with 0 in normalized space.
+    """
+
+    def __init__(self, *args, nan_rows=2, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._nan_rows = nan_rows
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            for source_vars in batch["target"].values():
+                for tensor in source_vars.values():
+                    tensor[..., : self._nan_rows, :] = float("nan")
+            yield batch
+
+
+def _masking_conf(tmp_path, **loss_overrides):
+    conf = _era5_gen2_multistep_conf(forecast_len=1, tmp_path=tmp_path)
+    conf["preblocks"] = {
+        "per_step": {
+            "fill": {"type": "fill_values", "args": {"variables": [], "rules": [{"search": "nan", "fill": 0.0}]}},
+            "concat": {"type": "concat"},
+        }
+    }
+    conf["postblocks"] = {"per_step": {"reconstruct": {"type": "reconstruct"}}}
+    conf["loss"] = {"mask_missing_targets": True, **loss_overrides}
+    return conf
+
+
+class TestERA5Gen2LossMasking:
+    """loss.mask_missing_targets: mean the loss over defined cells only."""
+
+    def test_disabled_by_default(self, tmp_path):
+        from credit.trainers.trainer_gen2 import TrainerERA5Gen2 as Trainer
+
+        trainer = Trainer(_tiny_model(), rank=0, conf=_era5_gen2_multistep_conf(forecast_len=1, tmp_path=tmp_path))
+        assert trainer.mask_missing_targets is False
+
+        loss = torch.arange(8.0).reshape(1, 2, 2, 2)
+        assert trainer._reduce_loss(loss, {}) == pytest.approx(loss.mean().item())
+
+    def test_mask_excludes_nan_target_cells(self, tmp_path):
+        """The mask is 0 exactly where the raw target is NaN, and the mean uses only the rest."""
+        from credit.trainers.trainer_gen2 import TrainerERA5Gen2 as Trainer
+
+        B, C, H, W = 2, 3, 4, 4
+        nan_rows = 1
+        trainer = Trainer(_tiny_model(), rank=0, conf=_masking_conf(tmp_path))
+
+        raw = {}
+        channel_map = {}
+        for i in range(C):
+            var_key = f"era5/prognostic/2d/v{i}"
+            tensor = torch.randn(B, 1, 1, H, W)
+            tensor[..., :nan_rows, :] = float("nan")
+            raw[var_key] = tensor
+            channel_map[var_key] = {"slice": slice(i, i + 1), "orig_shape": (1, 1)}
+
+        full_data_dict = {
+            "y": torch.ones(B, C, H, W),
+            "y_raw": {"era5": raw},
+            "metadata": {"target": {"_channel_map": channel_map}},
+        }
+
+        mask = trainer._get_loss_mask(full_data_dict)
+        assert mask.shape == (1, C, H, W)
+        assert mask[..., :nan_rows, :].sum() == 0.0
+        assert mask[..., nan_rows:, :].min() == 1.0
+
+        elementwise = torch.arange(B * C * H * W, dtype=torch.float32).reshape(B, C, H, W)
+        expected = elementwise[..., nan_rows:, :].mean()
+        assert trainer._reduce_loss(elementwise, full_data_dict).item() == pytest.approx(expected.item())
+        # Unmasked cells are a strict subset, so the two reductions must differ.
+        assert trainer._reduce_loss(elementwise, full_data_dict).item() != pytest.approx(elementwise.mean().item())
+
+    def test_mask_is_cached_across_calls(self, tmp_path):
+        from credit.trainers.trainer_gen2 import TrainerERA5Gen2 as Trainer
+
+        trainer = Trainer(_tiny_model(), rank=0, conf=_masking_conf(tmp_path))
+        tensor = torch.randn(1, 1, 1, 4, 4)
+        tensor[..., :1, :] = float("nan")
+        full_data_dict = {
+            "y": torch.ones(1, 1, 4, 4),
+            "y_raw": {"era5": {"era5/prognostic/2d/v0": tensor}},
+            "metadata": {"target": {"_channel_map": {"era5/prognostic/2d/v0": {"slice": slice(0, 1)}}}},
+        }
+        first = trainer._get_loss_mask(full_data_dict)
+        assert trainer._get_loss_mask(full_data_dict) is first
+
+    def test_scalar_loss_raises(self, tmp_path):
+        """Criteria that reduce internally cannot be masked; say so instead of silently ignoring."""
+        from credit.trainers.trainer_gen2 import TrainerERA5Gen2 as Trainer
+
+        trainer = Trainer(_tiny_model(), rank=0, conf=_masking_conf(tmp_path))
+        with pytest.raises(ValueError, match="elementwise loss"):
+            trainer._reduce_loss(torch.tensor(1.0), {})
+
+    def test_nonfinite_y_raises(self, tmp_path):
+        """0 * NaN is NaN, so masking cannot rescue an unfilled target — fail at the source."""
+        from credit.trainers.trainer_gen2 import TrainerERA5Gen2 as Trainer
+
+        trainer = Trainer(_tiny_model(), rank=0, conf=_masking_conf(tmp_path))
+        tensor = torch.randn(1, 1, 1, 4, 4)
+        tensor[..., :1, :] = float("nan")
+        y = torch.ones(1, 1, 4, 4)
+        y[..., :1, :] = float("nan")  # fill_values preblock omitted
+        full_data_dict = {
+            "y": y,
+            "y_raw": {"era5": {"era5/prognostic/2d/v0": tensor}},
+            "metadata": {"target": {"_channel_map": {"era5/prognostic/2d/v0": {"slice": slice(0, 1)}}}},
+        }
+        with pytest.raises(ValueError, match="finite target tensor"):
+            trainer._get_loss_mask(full_data_dict)
+
+    def test_train_one_epoch_masked_end_to_end(self, tmp_path):
+        """Full train step through fill_values -> concat with NaN land in the raw target."""
+        from credit.trainers.trainer_gen2 import TrainerERA5Gen2 as Trainer
+
+        B, C, H, W = 1, 4, 4, 4
+        nan_rows = 2
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        model = _ScaleModel().to(device)
+        trainer = Trainer(model, rank=0, conf=_masking_conf(tmp_path))
+
+        optimizer = torch.optim.SGD(trainer.model.parameters(), lr=1e-4)
+        results = trainer.train_one_epoch(
+            epoch=0,
+            trainloader=_NaNTargetLoader(B, C, H, W, n_batches=1, nan_rows=nan_rows),
+            optimizer=optimizer,
+            criterion=nn.MSELoss(reduction="none"),
+            scaler=torch.amp.GradScaler(device.type, enabled=False),
+            scheduler=None,
+            metrics=lambda pred, y: {"acc": 0.0},
+        )
+
+        assert torch.isfinite(torch.tensor(results["train_loss"][-1]))
+        assert trainer._loss_mask is not None
+        # nan_rows of H rows are masked out on every channel.
+        assert trainer._loss_mask.mean().item() == pytest.approx((H - nan_rows) / H)

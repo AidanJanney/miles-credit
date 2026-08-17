@@ -1,7 +1,7 @@
 """
 ocean_wet_mask.py
 -----------------
-OceanWetMask: gen2 postblock that zeroes land points in ocean predictions.
+OceanWetMask: gen2 postblock that blanks land points in ocean predictions.
 
 Unlike ``wet_mask_samudra.WetMaskBlock`` (coupled to the Samudra/OM4 global
 zarr conventions via ``credit.ocean.samudra_*``), this block is self-contained
@@ -13,12 +13,27 @@ It operates on the reconstructed output dict written by ``Reconstruct``::
 
     batch_dict["y_processed"][source][var_key] -> tensor (B, n_levels, n_time, H, W)
 
-For every selected variable the tensor is multiplied by a wet mask (ocean = 1,
-land = 0):
+For every selected variable, cells outside the wet mask are set to NaN:
 
 * 3D variables (``tensor.shape[1] == n_levels``) use the 3D mask
   ``wet3d[k, y, x] = 1`` iff ``zl[k] <= deptho[y, x]`` and ``wet[y, x] == 1``.
 * 2D / surface variables (``tensor.shape[1] == 1``) use the surface mask.
+
+**Why NaN and not 0** (``masked_fill_nan``, default True). ``y_processed`` is in
+*physical* units, and in multi-step rollout it is fed back through
+``assemble_rollout_batch`` into the preblock chain ``normalize -> fill_values ->
+concat``. Writing physical 0.0 makes ``normalize`` map masked cells to
+``(0 - mu)/sigma``, which for rMOM6 is -9.9 (thetao, levelwise) to -305,000
+(so, pointwise) -- while at step 1 the dataset's land is NaN, which ``normalize``
+passes through and ``fill_values`` turns into 0.0 in *normalized* space. Zeroing
+here therefore made step 2 of every rollout structurally different from step 1
+over land and every below-bathymetry cell, and models trained on that diverged
+within one autoregressive step. NaN matches the dataset's own land convention, so
+``fill_values`` produces the identical normalized-space 0.0 at every step.
+
+Set ``masked_fill_nan: False`` to restore multiply-by-mask zeroing for a
+pipeline whose feedback path stays in normalized space (as the gen1
+``wet_mask_samudra.WetMaskBlock`` did) or that has no NaN-filling preblock.
 
 Because ``Reconstruct`` detaches ``y_processed``, this masking shapes the
 rollout feed-back and the written outputs, **not** the single-step training
@@ -42,6 +57,7 @@ import logging
 
 import xarray as xr
 import torch
+import torch.nn.functional as F
 
 from credit.postblock.base import BasePostblock
 
@@ -49,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 
 class OceanWetMask(BasePostblock):
-    """Zero land points in reconstructed ocean predictions using static geometry.
+    """Blank land points in reconstructed ocean predictions using static geometry.
 
     The surface ``wet`` mask and ``deptho`` bathymetry come from ``static_path``.
     Layer depths (``zl``) are **not** in the MOM6 static file — they live in the
@@ -74,6 +90,13 @@ class OceanWetMask(BasePostblock):
             every variable in ``y_processed`` is masked.
         key: Which ``batch_dict`` entry holds the reconstructed dict
             (default ``"y_processed"``).
+        masked_fill_nan: Write NaN into masked cells (default True) instead of 0.
+            See the module docstring -- zeroing corrupts the multi-step feedback
+            path, because physical 0 does not normalize back to normalized 0.
+        halo_pad: ``((lat_start, lat_end), (lon_start, lon_end))`` cells appended to the
+            grid by the ``ocean_obc_halo`` preblock. The static geometry is edge-replicated
+            to match, so the prescribed-boundary halo is treated as open ocean rather than
+            masked away. Must equal the preblock's ``pad_lat``/``pad_lon``.
     """
 
     def __init__(
@@ -87,10 +110,14 @@ class OceanWetMask(BasePostblock):
         levels: list | None = None,
         variables: list[str] | None = None,
         key: str = "y_processed",
+        masked_fill_nan: bool = True,
+        halo_pad: tuple = ((0, 0), (0, 0)),
     ):
         super().__init__()
         self.variables = variables
         self.key = key
+        self.masked_fill_nan = masked_fill_nan
+        self.register_buffer("_nan", torch.tensor(float("nan")))
 
         with xr.open_dataset(static_path) as ds:
             wet = torch.tensor(ds[wet_var].values, dtype=torch.float32)  # (H, W), 0/1
@@ -99,6 +126,17 @@ class OceanWetMask(BasePostblock):
         # deptho is NaN over land in MOM6; treat NaN as depth 0 (dry everywhere).
         deptho = torch.nan_to_num(deptho, nan=0.0)
         wet = torch.nan_to_num(wet, nan=0.0)
+
+        # An OBC halo appended by the ocean_obc_halo preblock makes predictions one cell larger
+        # than the static geometry. Extend the masks by edge replication so the halo inherits
+        # its neighbour's wet/depth state -- the halo is prescribed open ocean, so masking it
+        # dry would blank the boundary condition the model was just handed.
+        if any(halo_pad):
+            lat0, lat1, lon0, lon1 = (*halo_pad[0], *halo_pad[1]) if len(halo_pad) == 2 else halo_pad
+            pad = (lon0, lon1, lat0, lat1)
+            wet = F.pad(wet[None, None], pad, mode="replicate")[0, 0]
+            deptho = F.pad(deptho[None, None], pad, mode="replicate")[0, 0]
+            logger.info("OceanWetMask: extended static geometry by halo_pad=%s -> %s", halo_pad, tuple(wet.shape))
 
         zl = self._resolve_level_depths(level_depths, level_source_path, level_var, levels)
 
@@ -153,6 +191,10 @@ class OceanWetMask(BasePostblock):
                     # Surface (2D) var, or 3D var when no depth-aware mask is
                     # available / level count differs: broadcast the surface mask.
                     mask = self.wet_surface
-                source_vars[var_key] = tensor * mask.to(device=tensor.device, dtype=tensor.dtype)
+                mask = mask.to(device=tensor.device, dtype=tensor.dtype)
+                if self.masked_fill_nan:
+                    source_vars[var_key] = torch.where(mask > 0, tensor, self._nan.to(tensor.dtype))
+                else:
+                    source_vars[var_key] = tensor * mask
 
         return batch_dict

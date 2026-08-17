@@ -257,6 +257,12 @@ loss:
 
   use_variable_weights: False
 
+  # Mean the loss over target cells the dataset actually defines, skipping cells that are NaN
+  # in the raw target (land / below bathymetry in ocean runs) and only become 0 via a
+  # fill_values preblock. Requires an elementwise loss -- incompatible with
+  # use_latitude_weights / use_variable_weights / ring-crps, which reduce internally.
+  mask_missing_targets: False
+
 
 # ---- Inference (used by rollout_gen2.py, not training) ---- #
 inference:

@@ -98,6 +98,10 @@ class RegionalMOM6Dataset(LocalDataset):
         }
         self.mode = "local"
         self.time_coord = self.curr_source_cfg.get("time_coord", "time")
+        # path -> open xr.Dataset, populated lazily inside __getitem__ (i.e. per DataLoader
+        # worker process, after fork/spawn -- never touched here in __init__, so this stays
+        # an empty, trivially picklable dict at worker-spawn time). See _open_cached.
+        self._open_cache: dict[str, xr.Dataset] = {}
         self.init_register_all_fields()
 
     def _extract_field(
@@ -121,42 +125,59 @@ class RegionalMOM6Dataset(LocalDataset):
         vars_3D: list[str] = vd["vars_3D"]
         vars_2D: list[str] = vd["vars_2D"]
 
-        with self._open(_find_file(file_intervals, t)) as ds:
-            ds_t = self._select_time(ds, field_type, t)
+        ds = self._open_cached(_find_file(file_intervals, t))
+        ds_t = self._select_time(ds, field_type, t)
 
-            # 3D variables: (n_levels, lat, lon) -> (n_levels, 1, lat, lon)
-            for vname in vars_3D:
-                file_var = self.rename.get(vname, vname)
-                da = ds_t[file_var]
-                if self.levels is None:
-                    arr = da.values
-                    if self.level_coord in ds_t.coords:
-                        self.levels = ds_t[self.level_coord].values.tolist()
-                        self.static_metadata["levels"] = self.levels
-                else:
-                    arr = da.sel({self.level_coord: self.levels}, method="nearest").values
-                tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(1)
-                sample[self._get_field_name(field_type, "3d", vname)] = tensor
+        # 3D variables: (n_levels, lat, lon) -> (n_levels, 1, lat, lon)
+        for vname in vars_3D:
+            file_var = self.rename.get(vname, vname)
+            da = ds_t[file_var]
+            if self.levels is None:
+                arr = da.values
+                if self.level_coord in ds_t.coords:
+                    self.levels = ds_t[self.level_coord].values.tolist()
+                    self.static_metadata["levels"] = self.levels
+            else:
+                arr = da.sel({self.level_coord: self.levels}, method="nearest").values
+            tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(1)
+            sample[self._get_field_name(field_type, "3d", vname)] = tensor
 
-            # 2D variables: (lat, lon) -> (1, 1, lat, lon)
-            for vname in vars_2D:
-                file_var = self.rename.get(vname, vname)
-                arr = ds_t[file_var].values
-                tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                sample[self._get_field_name(field_type, "2d", vname)] = tensor
+        # 2D variables: (lat, lon) -> (1, 1, lat, lon)
+        for vname in vars_2D:
+            file_var = self.rename.get(vname, vname)
+            arr = ds_t[file_var].values
+            tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            sample[self._get_field_name(field_type, "2d", vname)] = tensor
 
-    @staticmethod
-    def _open(path: str) -> xr.Dataset:
-        """Open *path*, using Zarr's consolidated metadata when the store is a Zarr store.
+    def _open_cached(self, path: str) -> xr.Dataset:
+        """Open *path* once per worker process and reuse the handle for every later sample.
 
-        ``preprocess_rmom6.py`` consolidates every store it writes, but xarray's default
-        (``consolidated=None``) does not use it and falls back to listing each array's
-        directory -- 0.303 s per open against 0.011 s here. This is on the hot path: a store
-        is reopened for every field type of every sample.
+        Previously reopened (and closed) a fresh ``xr.Dataset`` on every single call -- cheap
+        in wall-clock time (consolidated Zarr metadata makes an open ~0.011s), but each open
+        allocates a full set of index/metadata Python objects that a same-process reopen a few
+        milliseconds later doesn't need. Under the real training DDP layout (4 ranks/node x
+        (train+valid) thread_workers each), many workers touching a never-before-opened
+        store (e.g. crossing a year boundary) at the same moment produces simultaneous
+        transient RSS spikes per worker -- confirmed empirically (a diagnostic run tracking
+        each persistent DataLoader worker's RSS across 3 epochs showed non-monotonic
+        per-worker spikes up to ~9x the steady-state size, never a cumulative/monotonic leak).
+        Caching the open handle (keyed by path, populated lazily inside __getitem__ so it's
+        per-worker-process state, not touched at __init__/pickle time) means each store's
+        consolidated metadata is parsed once per worker instead of on every sample.
+
+        The cache only ever holds the small, fixed number of distinct store paths a training
+        run touches (one zarr per field type per year, not per sample), so it stays bounded
+        regardless of dataset length.
         """
+        cached = self._open_cache.get(path)
+        if cached is not None:
+            return cached
         if str(path).endswith(".zarr"):
-            return xr.open_dataset(path, engine="zarr", consolidated=True)
-        return xr.open_dataset(path)
+            ds = xr.open_dataset(path, engine="zarr", consolidated=True)
+        else:
+            ds = xr.open_dataset(path)
+        self._open_cache[path] = ds
+        return ds
 
     def _select_time(self, ds: xr.Dataset, field_type: str, t: pd.Timestamp) -> xr.Dataset:
         """Select the timestep from *ds*, handling MOM6's singleton static time axis."""

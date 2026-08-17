@@ -28,6 +28,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 
 from credit.models.checkpoint import TorchFSDPCheckpointIO, copy_checkpoint
+from credit.trainers.utils import log_dataloader_worker_rss
 from credit.scheduler import update_on_epoch
 from credit.trainers.preflight import check_dataloader_startup, check_model_gpu_memory
 from credit.trainers.utils import cleanup, effective_mode
@@ -629,6 +630,11 @@ class BaseTrainer(ABC):
                 valid_results = self.validate(epoch, valid_loader, valid_criterion, metrics)
                 if self.ema is not None:
                     self.ema.swap(self.model)
+
+            if self.rank == 0:
+                log_dataloader_worker_rss("train", train_loader)
+                if not self.skip_validation:
+                    log_dataloader_worker_rss("valid", valid_loader)
 
             # ---- Collect results ----
             results_dict["epoch"].append(epoch)

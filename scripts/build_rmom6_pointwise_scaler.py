@@ -75,6 +75,13 @@ DEFAULT_STATS_DIR = "/glade/work/ajanney/RegionalEmulation_v2/explore_statistics
 SOURCE_NAME = "rMOM6"
 LEVEL_VARS = ["thetao", "so", "uo", "vo"]  # covered by stats_pointwise_<var>.nc with a z1_l dim
 GLOBAL_VARS = ["SSH"]  # covered by stats_pointwise_SSH.nc, no level dim
+# Input-only 2D channels, covered by stats_pointwise_<var>_surface.nc (build_rmom6_surface_stats.py).
+# Level-independent, so the same files serve both the native-level and --level-pairs paths.
+# xi is a tendency scaling for predicted fields only, so it is never applied to these.
+SURFACE_VARS: dict[str, list[str]] = {
+    "dynamic_forcing": ["taux", "tauy", "net_heat_surface", "runoff"],
+    "static": ["deptho", "wet"],
+}
 # Native face axis needing a center-average regrid before use (None = already tracer-grid),
 # matching preprocess_rmom6.py's FORCING_SPEC-style "axis" convention: "X" = last array axis
 # (uo on xq), "Y" = second-to-last axis (vo on yq).
@@ -156,6 +163,19 @@ def build_stats_dict(
         var_keys.append(key)
         ds.close()
 
+    for field_type, varnames in SURFACE_VARS.items():
+        for varname in varnames:
+            path = os.path.join(stats_dir, f"stats_pointwise_{varname}_surface.nc")
+            if not os.path.exists(path):
+                print(f"WARNING: {path} missing -- run scripts/build_rmom6_surface_stats.py; skipping {varname}")
+                continue
+            ds = xr.open_dataset(path)
+            mu, sigma = _fill_stat(ds["mean"].values, ds["std"].values)
+            key = f"{SOURCE_NAME}/{field_type}/2d/{varname}"
+            stats[key] = {"mu": torch.from_numpy(mu[None]), "sigma": torch.from_numpy(sigma[None])}
+            var_keys.append(key)
+            ds.close()
+
     return stats, var_keys
 
 
@@ -213,14 +233,26 @@ def main() -> None:
         f"levels    : {'pairwise thickness-average (50 -> 25)' if args.level_pairs else ('all 50' if levels is None else levels)}"
     )
     print(f"wrote     : {out}")
+    predicted = [k for k in var_keys if "/prognostic/" in k]
+    input_only = [k for k in var_keys if "/prognostic/" not in k]
+
     print()
-    print("Variables covered (use this exact list for both preblocks.normalize.args.variables")
-    print("and postblocks.denorm.args.variables in the pointwise experiment configs):")
+    print("preblocks.normalize.args.variables — ALL covered variables (everything fed to the model):")
     for key in var_keys:
         print(f"  - {key}")
     print()
-    print("NOT covered (no stats yet): dynamic_forcing (taux, tauy, net_heat_surface, runoff), static (deptho, wet).")
-    print("Leave those out of pointwise_scaler's variables list — they pass through unscaled.")
+    print("postblocks.denorm.args.variables — PROGNOSTICS ONLY (the input-only channels below are")
+    print("never predicted, so there is nothing to invert for them):")
+    for key in predicted:
+        print(f"  - {key}")
+    print()
+    if input_only:
+        print(
+            f"Input-only channels now normalized ({len(input_only)}): "
+            + ", ".join(k.split("/")[-1] for k in input_only)
+        )
+        print("Leaving these out of the preblock list makes them enter the model RAW — deptho at ~2300x")
+        print("the prognostics' scale — which imprints bathymetry on the predicted surface fields.")
 
 
 if __name__ == "__main__":

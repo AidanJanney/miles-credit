@@ -102,6 +102,13 @@ preblocks:
           - "rMOM6/prognostic/3d/uo"
           - "rMOM6/prognostic/3d/vo"
           - "rMOM6/prognostic/2d/SSH"
+          # input-only channels: unnormalized these enter RAW (deptho ~2300x the prognostics) and imprint bathymetry on the surface fields
+          - "rMOM6/dynamic_forcing/2d/taux"
+          - "rMOM6/dynamic_forcing/2d/tauy"
+          - "rMOM6/dynamic_forcing/2d/net_heat_surface"
+          - "rMOM6/dynamic_forcing/2d/runoff"
+          - "rMOM6/static/2d/deptho"
+          - "rMOM6/static/2d/wet"
         method: transform
     fill_land:
       type: fill_values
@@ -187,9 +194,9 @@ trainer:
   valid_batch_size: 1
   batches_per_epoch: 4        # measured ~690-720s/iter at full scale -- unchanged despite chunking/OBC fixes (compute-bound at this batch size)
   valid_batches_per_epoch: 2
-  thread_workers: 8
-  valid_thread_workers: 8
-  prefetch_factor: 2
+  thread_workers: 4
+  valid_thread_workers: 4
+  prefetch_factor: 1
 
   start_epoch: 0
   num_epoch: 2                   # bounded by batches_per_epoch above -- real per-iter cost unchanged at full scale

@@ -24,9 +24,11 @@ to the nearest cell for the legacy ``source_flat_index`` map, kept for
 validation/tests). Nearest-neighbor rounding leaves a small but systematic
 discretization mismatch at every ghost cell relative to the true value the
 neighboring face would report at that exact location; compounded over long
-autoregressive rollouts this shows up as blur at the face seams. The native
-face window is always passed through exactly (never interpolated), so real
-input data is never touched.
+autoregressive rollouts this shows up as blur at the face seams. Every
+SE-owned cell is passed through exactly (never interpolated), so real input
+data is never touched. The SE-unowned cells inside the native face window --
+the de-duplicated shared face edges, which reach this module as zeros from
+``se_to_cube``'s scatter -- are filled like any other ghost cell.
 
 Geometry
 ~~~~~~~~
@@ -55,9 +57,10 @@ Implementation
 The module works on (B*6, C, H, W) tensors where the 6 faces are packed
 into the batch dimension in face order (face 0 at indices [::6][0], etc.).
 It returns (B*6, C, padded_size, padded_size).  The native face is located at
-``[crop_top:crop_top+H, crop_left:crop_left+W]`` (always exact, never
-interpolated); all other cells are bilinearly interpolated from physically
-equivalent owned SE cells on the owning face.
+``[crop_top:crop_top+H, crop_left:crop_left+W]``; its SE-owned cells are
+exact, never interpolated. Every other cell -- the ghost region outside that
+window, plus the SE-unowned seam cells inside it -- is bilinearly
+interpolated from physically equivalent owned SE cells on the owning face.
 
 All index buffers are registered as nn.Buffers so .to(device) moves them.
 
@@ -139,10 +142,22 @@ class HaloExchange(nn.Module):
         self.register_buffer("w10", torch.from_numpy(w10))
         self.register_buffer("w11", torch.from_numpy(w11))
 
-        native_mask = np.zeros((self.padded_size, self.padded_size), dtype=bool)
-        native_mask[self.crop_top : self.crop_top + NFACE_EDGE, self.crop_left : self.crop_left + NFACE_EDGE] = True
+        # Pass-through mask: a cell is taken verbatim from the input only if it
+        # is inside the native window AND actually owned by an SE node. The SE
+        # grid de-duplicates cells shared between faces, so a face's native
+        # window contains cells with no owning node (on ne120: 4,324 cells --
+        # two edge rings on faces 2/3, all four on the polar faces 4/5). Those
+        # arrive from se_to_cube's scatter as zeros; they must be gathered from
+        # the owning neighbour face like any other ghost cell, not passed
+        # through. A fully-populated cube (every cell owned) is unaffected.
+        se_owned = np.zeros(NFACE * NFACE_EDGE * NFACE_EDGE, dtype=bool)
+        se_owned[np.load(str(se_index_path)).astype(np.int64)] = True
+        native_mask = np.zeros((NFACE, self.padded_size, self.padded_size), dtype=bool)
+        native_mask[:, self.crop_top : self.crop_top + NFACE_EDGE, self.crop_left : self.crop_left + NFACE_EDGE] = (
+            se_owned.reshape(NFACE, NFACE_EDGE, NFACE_EDGE)
+        )
         self.register_buffer(
-            "native_mask", torch.from_numpy(native_mask).view(1, 1, self.padded_size, self.padded_size)
+            "native_mask", torch.from_numpy(native_mask).view(1, NFACE, 1, self.padded_size, self.padded_size)
         )
 
     # ------------------------------------------------------------------
@@ -359,8 +374,9 @@ class HaloExchange(nn.Module):
         """Pad faces with a full ghost-cell exchange.
 
         Ghost cells are bilinearly interpolated from the owning face's 4
-        bracketing cells; the native face window is always the exact input,
-        never interpolated.
+        bracketing cells. SE-owned cells are always the exact input, never
+        interpolated; SE-unowned cells inside the native face window are
+        gathered like ghost cells, since the scatter leaves them at zero.
 
         Parameters
         ----------
@@ -385,9 +401,9 @@ class HaloExchange(nn.Module):
         interpolated = (
             gather(self.idx00) * w00 + gather(self.idx01) * w01 + gather(self.idx10) * w10 + gather(self.idx11) * w11
         )
-        interpolated = interpolated.permute(0, 2, 1, 3, 4).reshape(B6, C, p, p)
+        interpolated = interpolated.permute(0, 2, 1, 3, 4)  # (B, NFACE, C, p, p)
 
         pad_top, pad_left = self.crop_top, self.crop_left
         pad_bottom, pad_right = p - self.crop_top - H, p - self.crop_left - W
-        x_native = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom))
-        return torch.where(self.native_mask, x_native, interpolated)
+        x_native = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom)).reshape(B, NFACE, C, p, p)
+        return torch.where(self.native_mask, x_native, interpolated).reshape(B6, C, p, p)
